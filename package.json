@@ -1,0 +1,44 @@
+{
+  "name": "bevel-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local-first STL bevel editor: mark edges, dial in a fillet, export a clean mesh.",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "spike": "tsx experiments/spike/run.ts",
+    "acceptance": "tsx tools/acceptance.ts",
+    "bench": "tsx tools/bench-1m.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "manifold-3d": "^3.5.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "three": "^0.187.0",
+    "zustand": "^5.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.187.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "puppeteer-core": "^25.17.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

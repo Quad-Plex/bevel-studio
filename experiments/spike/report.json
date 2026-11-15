@@ -1,0 +1,1037 @@
+{
+  "kernel": "manifold-3d 3.5.5 (wasm)",
+  "generatedAt": "2026-11-13T20:08:01.401Z",
+  "units": "mm",
+  "flags": {
+    "width": 0.5,
+    "segments": 4,
+    "profile": 0.5,
+    "angle": 20,
+    "inflate": 0,
+    "taper": "auto",
+    "clamp": true
+  },
+  "booleanMode": "Manifold.union(cutSolids) once, then base.subtract(union) once; timing forces the deferred tree with numTri()",
+  "findings": [
+    "PLAN §4.4.2: t1 = A + r·m2 is only the tangent point when the two faces are perpendicular; in general it is the foot of the perpendicular from the arc centre c onto each face.",
+    "PLAN §4.4.4: clamping to 0.98·min(maxWidth) over the whole selection collapses to 0.002 mm on the reference model (sliver triangles with 0.001 mm altitude), which removes almost nothing. A per-edge clamp is required.",
+    "PLAN §4.4.3: fading the radius to 0 over min(r, 0.25·L) at both ends of a 20 mm edge removes 16.27 mm³ instead of 18.77 mm³, so the \"7981.2\" expectation only holds for a full-length sweep.",
+    "Test B expectation: 7900–7985 mm³ is inconsistent with the brief's own 18.77 mm³ per edge (12 × 18.77 + 8 corners ≈ 244 mm³ removed → 7756). Measured 7786.4, analytic 7785.",
+    "manifold-3d 3.5.5 has no batchBoolean; Manifold.union(readonly Manifold[]) is the batched union and Manifold.difference(list) the batched difference.",
+    "PLAN §5.3 says 87 candidates at dihedral ≥ 20°; 87 is the count of ALL convex edges (>0.5°), 77 are ≥ 20°.",
+    "PLAN §9 ε-inset mitigation fails: shrinking the fillet arc turns the cut into a knife-edged slit that never reaches the surface (bbox unchanged, 2234 self-intersections). Not usable.",
+    "A boolean can place two vertices closer than float32 resolution; the STL then welds them into degenerate triangles and re-imports non-manifold. Export must weld at 1e-4 mm and rebuild the Manifold first.",
+    "CSG retriangulation costs triangles: 2204 vs the reference 654 for the same volume, mostly at terminations and trimmed faces.",
+    "Corner spheres at 8 circular segments remove ~9 % more corner material than an exact sphere; at r=2 that is ~3 mm³ over 8 corners."
+  ],
+  "tests": [
+    {
+      "id": "B",
+      "label": "cube 20 mm, all 12 edges, r=2 seg 4, sphere corners",
+      "pass": true,
+      "base": {
+        "triangles": 12,
+        "volume": 8000,
+        "bbox": {
+          "size": [
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "selection": {
+        "edges": 12,
+        "width": {
+          "min": 2,
+          "max": 2,
+          "median": 2,
+          "full": 12,
+          "clamped": 0,
+          "skipped": 0
+        },
+        "corners": 8,
+        "unsupportedCorners": 0,
+        "skippedShort": 0
+      },
+      "cuts": {
+        "solids": 20,
+        "triangles": 560
+      },
+      "clean": {
+        "droppedComponents": 3,
+        "weldedVerts": 82
+      },
+      "result": {
+        "triangles": 332,
+        "vertices": 168,
+        "volume": 7786.444,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            0,
+            0,
+            0
+          ],
+          "max": [
+            20,
+            20,
+            20
+          ],
+          "size": [
+            20,
+            20,
+            20
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 168
+        },
+        "selfIntersections": 0,
+        "bboxSize": [
+          20,
+          20,
+          20
+        ],
+        "removedVolume": 213.556
+      },
+      "ms": {
+        "build": 13.32,
+        "boolean": 23.06,
+        "clean": 4.32,
+        "total": 41.31
+      },
+      "expected": {
+        "removedVolume": 244,
+        "volume": 7785,
+        "tolerance": 20,
+        "note": "12 edge prisms + 8 spherical octants; exact-circle rounded cube is 7804.7"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": true,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 1.444,
+        "removedBelowPrediction": true,
+        "bboxUnchanged": true,
+        "roundedCorners": true
+      },
+      "notes": []
+    },
+    {
+      "id": "A-noTaper",
+      "label": "cube 20 mm, ONE edge r=2 seg 4, full radius to the vertex (no taper)",
+      "pass": true,
+      "base": {
+        "triangles": 12,
+        "volume": 8000,
+        "bbox": {
+          "size": [
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "selection": {
+        "edges": 1,
+        "width": {
+          "min": 2,
+          "max": 2,
+          "median": 2,
+          "full": 1,
+          "clamped": 0,
+          "skipped": 0
+        },
+        "corners": 0,
+        "unsupportedCorners": 0,
+        "skippedShort": 0
+      },
+      "cuts": {
+        "solids": 1,
+        "triangles": 20
+      },
+      "clean": {
+        "droppedComponents": 0,
+        "weldedVerts": 0
+      },
+      "result": {
+        "triangles": 28,
+        "vertices": 16,
+        "volume": 7981.229,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            0,
+            0,
+            0
+          ],
+          "max": [
+            20,
+            20,
+            20
+          ],
+          "size": [
+            20,
+            20,
+            20
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 16
+        },
+        "selfIntersections": 0,
+        "bboxSize": [
+          20,
+          20,
+          20
+        ],
+        "removedVolume": 18.771
+      },
+      "ms": {
+        "build": 0.47,
+        "boolean": 0.41,
+        "clean": 0.29,
+        "total": 1.31
+      },
+      "expected": {
+        "removedVolume": 18.77,
+        "volume": 7981.2,
+        "tolerance": 2,
+        "note": "analytic full-length 4-segment quarter-round"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": true,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 0.029,
+        "removedBelowPrediction": true
+      },
+      "notes": []
+    },
+    {
+      "id": "A",
+      "label": "cube 20 mm, ONE edge r=2 seg 4, radius tapered to 0 at both ends",
+      "pass": true,
+      "base": {
+        "triangles": 12,
+        "volume": 8000,
+        "bbox": {
+          "size": [
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "selection": {
+        "edges": 1,
+        "width": {
+          "min": 2,
+          "max": 2,
+          "median": 2,
+          "full": 1,
+          "clamped": 0,
+          "skipped": 0
+        },
+        "corners": 0,
+        "unsupportedCorners": 0,
+        "skippedShort": 0
+      },
+      "cuts": {
+        "solids": 1,
+        "triangles": 24
+      },
+      "clean": {
+        "droppedComponents": 0,
+        "weldedVerts": 0
+      },
+      "result": {
+        "triangles": 32,
+        "vertices": 18,
+        "volume": 7983.732,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            0,
+            0,
+            0
+          ],
+          "max": [
+            20,
+            20,
+            20
+          ],
+          "size": [
+            20,
+            20,
+            20
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 18
+        },
+        "selfIntersections": 0,
+        "bboxSize": [
+          20,
+          20,
+          20
+        ],
+        "removedVolume": 16.268
+      },
+      "ms": {
+        "build": 0.22,
+        "boolean": 0.35,
+        "clean": 0.29,
+        "total": 0.97
+      },
+      "expected": {
+        "removedVolume": 16.27,
+        "volume": 7983.7,
+        "tolerance": 2,
+        "note": "same sweep, radius faded to 0 over 2 mm at each end"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": true,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 0.032,
+        "removedBelowPrediction": true
+      },
+      "notes": []
+    },
+    {
+      "id": "C",
+      "label": "hook, ALL convex ≥ 20°, w=0.5 seg 4 p=0.5",
+      "pass": false,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 59,
+        "width": {
+          "min": 0.046305008232593536,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 43,
+          "clamped": 16,
+          "skipped": 18
+        },
+        "corners": 15,
+        "unsupportedCorners": 4,
+        "skippedShort": 9
+      },
+      "cuts": {
+        "solids": 65,
+        "triangles": 1802
+      },
+      "clean": {
+        "droppedComponents": 0,
+        "weldedVerts": 69
+      },
+      "result": {
+        "triangles": 1650,
+        "vertices": 827,
+        "volume": 12845.49,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.662,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            61.919,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 827
+        },
+        "selfIntersections": 11,
+        "bboxSize": [
+          47.88,
+          61.919,
+          35.001
+        ],
+        "removedVolume": 26.314
+      },
+      "ms": {
+        "build": 12.2,
+        "boolean": 31.12,
+        "clean": 5.47,
+        "total": 49.12
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": false,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 56.99,
+        "removedBelowPrediction": true,
+        "bboxWithin1pct": true
+      },
+      "notes": []
+    },
+    {
+      "id": "C-noclamp",
+      "label": "hook, ALL convex ≥ 20°, w=0.5 seg 4 p=0.5, clamp off",
+      "pass": false,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 77,
+        "width": {
+          "min": 0.5,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 77,
+          "clamped": 0,
+          "skipped": 0
+        },
+        "corners": 19,
+        "unsupportedCorners": 0,
+        "skippedShort": 13
+      },
+      "cuts": {
+        "solids": 83,
+        "triangles": 2272
+      },
+      "clean": {
+        "droppedComponents": 3,
+        "weldedVerts": 113
+      },
+      "result": {
+        "triangles": 2204,
+        "vertices": 1104,
+        "volume": 12782.999,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.662,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            61.919,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 1104
+        },
+        "selfIntersections": 5,
+        "bboxSize": [
+          47.88,
+          61.919,
+          35.001
+        ],
+        "removedVolume": 88.805
+      },
+      "ms": {
+        "build": 13.72,
+        "boolean": 48.6,
+        "clean": 7.76,
+        "total": 70.41
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": false,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": -5.501,
+        "removedBelowPrediction": true,
+        "bboxWithin1pct": true
+      },
+      "notes": []
+    },
+    {
+      "id": "C+eps",
+      "label": "hook, ALL convex ≥ 20°, w=0.5 seg 4 p=0.5, arc inset 1e-4 mm",
+      "pass": false,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 59,
+        "width": {
+          "min": 0.046305008232593536,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 43,
+          "clamped": 16,
+          "skipped": 18
+        },
+        "corners": 15,
+        "unsupportedCorners": 4,
+        "skippedShort": 9
+      },
+      "cuts": {
+        "solids": 65,
+        "triangles": 1802
+      },
+      "clean": {
+        "droppedComponents": 2,
+        "weldedVerts": 169
+      },
+      "result": {
+        "triangles": 1916,
+        "vertices": 962,
+        "volume": 12846.052,
+        "status": "NoError",
+        "shells": 2,
+        "genus": -1,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.894,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 41,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 22,
+          "vertices": 921
+        },
+        "selfIntersections": 2234,
+        "bboxSize": [
+          47.88,
+          62.151,
+          35.001
+        ],
+        "removedVolume": 25.752
+      },
+      "ms": {
+        "build": 10.29,
+        "boolean": 32.3,
+        "clean": 9.53,
+        "total": 52.38
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": false,
+        "noZeroArea": true,
+        "noDuplicatePositions": false,
+        "reimportsManifold": false,
+        "selfIntersections": false,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 57.552,
+        "removedBelowPrediction": true,
+        "bboxWithin1pct": true
+      },
+      "notes": []
+    },
+    {
+      "id": "D",
+      "label": "hook, convex ≥ 20° excluding midpoint.x < −16.9 (under-table plate)",
+      "pass": false,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 14,
+        "width": {
+          "min": 0.046382296830415726,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 7,
+          "clamped": 7,
+          "skipped": 13
+        },
+        "corners": 7,
+        "unsupportedCorners": 4,
+        "skippedShort": 5
+      },
+      "cuts": {
+        "solids": 16,
+        "triangles": 486
+      },
+      "clean": {
+        "droppedComponents": 1,
+        "weldedVerts": 20
+      },
+      "result": {
+        "triangles": 480,
+        "vertices": 242,
+        "volume": 12856.498,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.894,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 242
+        },
+        "selfIntersections": 10,
+        "bboxSize": [
+          47.88,
+          62.151,
+          35.001
+        ],
+        "removedVolume": 15.306
+      },
+      "ms": {
+        "build": 3.69,
+        "boolean": 7.73,
+        "clean": 1.74,
+        "total": 13.39
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": false,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 67.998,
+        "removedBelowPrediction": true
+      },
+      "notes": []
+    },
+    {
+      "id": "D-noclamp",
+      "label": "hook, convex ≥ 20° excluding midpoint.x < −16.9 (under-table plate), clamp off",
+      "pass": true,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 27,
+        "width": {
+          "min": 0.5,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 27,
+          "clamped": 0,
+          "skipped": 0
+        },
+        "corners": 11,
+        "unsupportedCorners": 0,
+        "skippedShort": 9
+      },
+      "cuts": {
+        "solids": 29,
+        "triangles": 848
+      },
+      "clean": {
+        "droppedComponents": 1,
+        "weldedVerts": 52
+      },
+      "result": {
+        "triangles": 862,
+        "vertices": 433,
+        "volume": 12798.209,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.894,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 0,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 0,
+          "vertices": 433
+        },
+        "selfIntersections": 0,
+        "bboxSize": [
+          47.88,
+          62.151,
+          35.001
+        ],
+        "removedVolume": 73.595
+      },
+      "ms": {
+        "build": 5.65,
+        "boolean": 20.42,
+        "clean": 3.11,
+        "total": 29.41
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": true,
+        "reimportsManifold": true,
+        "selfIntersections": true,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 9.709,
+        "removedBelowPrediction": true
+      },
+      "notes": []
+    },
+    {
+      "id": "D+eps",
+      "label": "hook, convex ≥ 20° excluding midpoint.x < −16.9 (under-table plate), arc inset 1e-4 mm",
+      "pass": false,
+      "base": {
+        "triangles": 140,
+        "volume": 12871.804,
+        "bbox": {
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        }
+      },
+      "selection": {
+        "edges": 14,
+        "width": {
+          "min": 0.046382296830415726,
+          "max": 0.5,
+          "median": 0.5,
+          "full": 7,
+          "clamped": 7,
+          "skipped": 13
+        },
+        "corners": 7,
+        "unsupportedCorners": 4,
+        "skippedShort": 5
+      },
+      "cuts": {
+        "solids": 16,
+        "triangles": 486
+      },
+      "clean": {
+        "droppedComponents": 0,
+        "weldedVerts": 69
+      },
+      "result": {
+        "triangles": 500,
+        "vertices": 252,
+        "volume": 12862.066,
+        "status": "NoError",
+        "shells": 1,
+        "genus": 0,
+        "bbox": {
+          "min": [
+            -32.735,
+            -26.894,
+            0
+          ],
+          "max": [
+            15.145,
+            35.257,
+            35.001
+          ],
+          "size": [
+            47.88,
+            62.151,
+            35.001
+          ]
+        },
+        "boundaryEdges": 0,
+        "nonManifoldEdges": 0,
+        "duplicatePositions": 4,
+        "zeroAreaTriangles": 0,
+        "reimport": {
+          "boundaryEdges": 0,
+          "nonManifoldEdges": 1,
+          "vertices": 248
+        },
+        "selfIntersections": 122,
+        "bboxSize": [
+          47.88,
+          62.151,
+          35.001
+        ],
+        "removedVolume": 9.738
+      },
+      "ms": {
+        "build": 3.48,
+        "boolean": 8.65,
+        "clean": 3.35,
+        "total": 15.7
+      },
+      "expected": {
+        "removedVolume": 83.3,
+        "volume": 12788.5,
+        "tolerance": 127.9,
+        "note": "reference Desk_Hook_Quatsch_improved.stl ±1 %"
+      },
+      "checks": {
+        "manifold": true,
+        "watertight": true,
+        "oneShell": true,
+        "noZeroArea": true,
+        "noDuplicatePositions": false,
+        "reimportsManifold": false,
+        "selfIntersections": false,
+        "removedPositive": true,
+        "volumeWithinTolerance": true,
+        "volumeDelta": 73.566,
+        "removedBelowPrediction": true
+      },
+      "notes": []
+    }
+  ],
+  "scale": [
+    {
+      "refine": 1,
+      "baseTriangles": 140,
+      "cuts": 65,
+      "cutTriangles": 1802,
+      "resultTriangles": 1794,
+      "volume": 12845.49,
+      "status": "NoError",
+      "booleanMs": 12.54
+    },
+    {
+      "refine": 8,
+      "baseTriangles": 8960,
+      "cuts": 65,
+      "cutTriangles": 1802,
+      "resultTriangles": 9718,
+      "volume": 12845.49,
+      "status": "NoError",
+      "booleanMs": 38.39
+    },
+    {
+      "refine": 16,
+      "baseTriangles": 35840,
+      "cuts": 65,
+      "cutTriangles": 1802,
+      "resultTriangles": 33882,
+      "volume": 12845.49,
+      "status": "NoError",
+      "booleanMs": 84.67
+    },
+    {
+      "refine": 32,
+      "baseTriangles": 143360,
+      "cuts": 65,
+      "cutTriangles": 1802,
+      "resultTriangles": 130402,
+      "volume": 12845.49,
+      "status": "NoError",
+      "booleanMs": 246.97
+    }
+  ],
+  "selfCheck": {
+    "baseHookSelfIntersections": 0
+  },
+  "extrapolation": {
+    "model": "booleanMs ≈ intercept + slope · baseTriangles (fixed 65 cut solids)",
+    "slopeMsPerTriangle": 0.001509,
+    "interceptMs": 30.57,
+    "at100k": 181.5,
+    "at1M": 1540.1,
+    "note": "measured up to 143 k base triangles; 1 M is extrapolated, not run"
+  },
+  "hookBest": {
+    "id": "C-noclamp",
+    "volume": 12782.999,
+    "triangles": 2204
+  }
+}

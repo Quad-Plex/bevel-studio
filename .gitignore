@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.verify-*/
+src-tauri/target/
+src-tauri/gen/
+experiments/spike/out/
+*.log
+
+# Documentation renders are generated; keep only the images the README uses.
+renders/*
+!renders/final-loaded.png
+!renders/final-empty.png
+
+.DS_Store
+Thumbs.db
