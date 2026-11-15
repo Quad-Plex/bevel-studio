@@ -1,0 +1,40 @@
+name: Bug report
+description: Something behaves incorrectly or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security issues, use the private advisory link in SECURITY.md instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what the app did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Model and parameters
+      description: Which STL (attach it or a minimal reproducer), which edges, width, segments, profile.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release, or the commit if you run from source.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser or desktop build, OS, and the import report (watertight, warnings).
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Errors or warnings from the developer console, if any.
+      render: text

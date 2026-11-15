@@ -1,120 +1,146 @@
 # Bevel Studio
 
-A local-first STL bevel editor. Drop in a printable model, let it find the
-bevelled-able edges, refine the selection by clicking or painting, dial in a
-fillet, and export a watertight STL — without opening Blender.
+[![CI](https://github.com/Quad-Plex/bevel-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Quad-Plex/bevel-studio/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A526-informational)](package.json)
 
-![Workspace](renders/final-loaded.png)
+A local-first STL bevel editor for printable models. Import a mesh, let Bevel
+Studio find the edges worth beveling, refine the selection by clicking or
+painting, dial in a fillet, and export a watertight STL — without opening a
+modelling suite.
 
-## Run it
+Everything runs on the machine: no upload, no account, no network calls. The
+desktop build wraps the same web app in a Tauri shell.
+
+![Bevel Studio workspace](renders/final-loaded.png)
+
+## Features
+
+- **Import** — binary or ASCII STL in millimetres, origin preserved. The repair
+  pipeline welds at 1e-4 mm, fixes winding, drops duplicate and degenerate
+  faces, fills holes up to 64 edges and removes tiny disconnected shells.
+- **Edges** — canonical edge table with dihedral angle, convexity, per-edge
+  `maxWidth` and auto-detected candidates (convex, ≥ 20°).
+- **Selection** — click, right-click erase, drag to paint, `A` for all
+  candidates, `Ctrl+Z` / `Ctrl+Shift+Z` to undo and redo, `F` to refit.
+- **Bevel** — width, segments and profile with a real rolling-ball cut solid
+  and a Manifold WASM boolean, previewed live in a worker.
+- **Export** — binary STL in the input's units and origin, blocked when the
+  result is not watertight.
+
+## Requirements
+
+| | |
+|---|---|
+| Node | 26 or newer (`.nvmrc`) |
+| npm | 11 or newer |
+| Desktop build only | Rust stable, MSVC toolchain, Visual Studio Build Tools (C++), WebView2 |
+
+## Quick start
 
 ```bash
-npm install
+npm ci
 npm run dev        # http://localhost:5183
 ```
 
-Production build: `npm run build` (static `dist/`).
+Build the static app with `npm run build` (output in `dist/`). Serve `dist/`
+from the origin root; asset URLs are absolute.
 
-### Desktop app (Tauri)
+### Desktop build
 
 ```bash
-npm run tauri build
+npm run tauri dev     # shell against the dev server
+npm run tauri build   # NSIS installer in src-tauri/target/release/bundle/nsis/
 ```
 
-Installer: `src-tauri/target/release/bundle/nsis/Bevel Studio_0.1.0_x64-setup.exe`.
-`npm run tauri dev` opens the desktop shell against the dev server.
+## Commands
 
-Prerequisites (already installed on this machine): Node 26, Rust stable with the
-MSVC toolchain, Visual Studio Build Tools (C++ workload), WebView2 runtime.
-
-## What works
-
-- **Import** — binary or ASCII STL, millimetres, origin preserved. Repair pipeline
-  welds at 1e-4 mm, fixes winding, drops duplicate/degenerate faces, fills holes
-  up to 64 edges, removes tiny disconnected shells.
-- **Edges** — canonical edge table with dihedral angle, convexity, per-edge
-  `maxWidth`, and auto-detected candidates (convex, ≥ 20°).
-- **Selection** — left-click adds an edge, right-click removes it, drag paints the
-  same value, middle-drag pans, wheel zooms, `A` selects all candidates,
-  `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo, `F` refits. A permanent legend sits at
-  the bottom of the viewport.
-- **Bevel** — width, segments, profile, per-edge clamp, live preview in a worker.
-  The bevel is a real boolean of the rolling-ball cut solid, so flap faces and
-  runaway edges are structurally impossible.
-- **Export** — binary STL, same units and origin as the input.
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Vite dev server on port 5183 |
+| `npm run build` | Typecheck, then build `dist/` |
+| `npm run preview` | Serve the production build |
+| `npm test` | Vitest suite |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run acceptance` | Reference bevel gate, exits non-zero on drift |
+| `npm run bench` | 1.08 M-triangle import and bevel benchmark |
+| `npm run tauri <cmd>` | Tauri CLI |
 
 ## Reference acceptance
 
-`npm run acceptance` bevels `public/fixtures/hook-base.stl` with the same kernel
-the app uses and compares it with the model that was hand-made in Blender:
+`npm run acceptance` bevels `public/fixtures/hook-base.stl` with the same
+kernel the app uses and compares the result with a model that was made by hand
+in Blender:
 
-| | triangles | volume | bbox (mm) |
+| | triangles | volume (mm³) | bbox (mm) |
 |---|---|---|---|
 | source | 140 | 12 871.80 | 47.88 × 62.15 × 35.00 |
 | hand-made reference | 654 | 12 788.47 | 47.88 × 61.87 × 35.00 |
-| **tool, all convex edges** | 2 686 | **12 782.60** (−0.05 %) | **47.88 × 61.92 × 35.00** |
+| **all convex edges** | 2 686 | **12 782.60** (−0.05 %) | **47.88 × 61.92 × 35.00** |
 
 The tool lands within 0.05 % of the reference volume and 0.05 mm on the
 bounding box. It keeps roughly 4× more triangles because CSG retriangulates
-the trimmed faces; the shape, not the tessellation, is the acceptance criterion.
-`npm run acceptance` asserts those windows and exits non-zero when the shape
-drifts, so it can gate a release.
-
-## Known issue: crossings at tight corners
-
-Beveling **all** convex edges also bevels the under-table plate, whose corners
-are too tight for the current corner handling: the result can contain
-self-intersecting triangles. The kernel detects them (`bevel.selfIntersection`),
-marks the result not watertight, and the Inspector blocks export rather than
-shipping broken geometry. The outside-rim selection is clean and is asserted at
-zero crossings by `npm run acceptance`.
-
-Until the clamp is made chain-consistent (adjacent cuts sharing one radius),
-deselect the four plate-corner edges before exporting.
+the trimmed faces; the shape, not the tessellation, is the acceptance
+criterion. The command asserts volume, bounding box, shell count and triangle
+window, and fails the build when the shape drifts.
 
 ## Architecture
 
 ```
 src/
-  engine/        pure TypeScript, no DOM, no three.js
-    io/stl.ts        parse + weld
-    repair/          R1–R8 repair pipeline
-    topo/            canonical edge table, union-find, Euler metadata
-    bevel/           cut-solid construction, Manifold WASM boolean, STL writer
-    worker.ts        owns the source mesh; import/preview/export jobs
-    client.ts        main-thread façade, latest-wins preview
-  viewport/      three.js scene, edge overlay, picking, selection gestures
-  panels/        inspector, top bar, status bar
-  ui/            glass component kit + gallery at /?gallery=1
-  state/         zustand store, engine singleton, live preview, export
+  engine/    pure TypeScript: STL I/O, repair, topology, bevel kernel, worker
+  viewport/  three.js scene, edge overlay, picking, selection gestures
+  panels/    inspector, top bar, status bar
+  ui/        glass component kit, gallery at /?gallery=1
+  state/     zustand store, engine client, live preview, export
+src-tauri/   Tauri v2 shell, NSIS packaging
+tools/       acceptance, benchmark and browser checks
 ```
 
-Performance, measured with `npm run bench` (1,080,000-triangle cube, 51.5 MB STL)
-and `node tools/e2e-1m.mjs` (same file through the browser):
+The engine has no DOM, React or three.js imports, so it runs unchanged in the
+worker, in Node tools and in tests. Edge ids are canonical across the analyzer
+and the kernel, and a result that is not watertight cannot be exported. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data flow and the worker
+contract.
+
+## Performance
+
+Measured on the development machine (Windows, Node 26) with `npm run bench`
+(1 080 000-triangle cube, 51.5 MB STL) and `node tools/e2e-1m.mjs` (same file
+through the browser):
 
 | stage | Node | browser |
 |---|---|---|
 | parse + weld (2.16 M raw verts → 540 k) | 1.18 s | 7.57 s (whole import) |
 | repair + edge table (1.62 M edges) | 3.64 s | — |
 | bevel 400 edges (incl. boolean + cleanup) | 3.97 s | — |
-| first rendered frame after import | — | **7 ms** |
+| first rendered frame after import | — | 7 ms |
 | hook (140 tris), bevel | 47 ms | — |
 
-Above 300 k triangles the viewport switches to flat shading (facet normals in the
-shader) instead of merging creased normals, which is what keeps the first frame
+Above 300 k triangles the viewport switches to flat shading (facet normals in
+the shader) instead of merging creased normals, which keeps the first frame
 instant. The 1 M import is dominated by the worker's repair pass.
 
-## Not done yet
+## Known limitations
 
-- Loop/ring and silhouette-sweep selection (click/paint is implemented).
-- Concave-edge bevels (rejected with a warning by design).
-- A BVH for pointer picking: raycasts are linear in triangle count, so painting
-  on a 1 M-triangle mesh is sluggish.
-- Repeated-preview WASM heap measurement; the kernel frees temporaries but the
-  Manifold heap itself is not tracked.
+- Beveling **all** convex edges also bevels the under-table plate of the
+  reference model, whose corners are too tight for the current corner
+  handling. Crossings are detected, flagged and export-blocked; deselect the
+  four plate-corner edges until the clamp is chain-consistent.
+- Loop/ring and silhouette-sweep selection are not implemented; click and
+  paint are.
+- Concave edges are rejected with a warning by design.
+- Pointer picking is linear in triangle count, so painting on a
+  1 M-triangle mesh is slow (no BVH yet).
+- WASM heap growth across repeated previews is not measured.
 
-## Docs
+## Documentation
 
-- `PLAN.md` — the full product and geometry plan.
-- `ORCHESTRATION.md` — workstream split, contracts and gates.
-- `experiments/spike/report.json` — the kernel feasibility measurements.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — threads, data flow, invariants.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, conventions, review checklist.
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
+- [`SECURITY.md`](SECURITY.md) — reporting a vulnerability.
+
+## License
+
+[MIT](LICENSE) © Bevel Studio contributors.

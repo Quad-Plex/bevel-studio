@@ -30,6 +30,13 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Bevel Studio",
+    "copyright": "© 2026 Bevel Studio contributors",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Local-first STL bevel editor",
+    "longDescription": "Import a printable STL, select edges, tune a fillet and export a watertight mesh, entirely offline.",
+    "homepage": "https://github.com/Quad-Plex/bevel-studio",
+    "license": "MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

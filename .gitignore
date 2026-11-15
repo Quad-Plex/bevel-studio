@@ -3,8 +3,15 @@ dist/
 .verify-*/
 src-tauri/target/
 src-tauri/gen/
-experiments/spike/out/
 *.log
+
+# Local tooling and secrets
+.env
+.env.*
+!.env.example
+.vite/
+coverage/
+*.tsbuildinfo
 
 # Documentation renders are generated; keep only the images the README uses.
 renders/*

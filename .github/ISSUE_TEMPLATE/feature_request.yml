@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a capability or a change in behaviour.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The workflow that is missing or painful today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would like to see. Mention alternatives you considered.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Import and repair
+        - Edge detection and selection
+        - Bevel kernel
+        - Viewport and UI
+        - Export and packaging
+        - Performance
+        - Documentation and tooling
+    validations:
+      required: true

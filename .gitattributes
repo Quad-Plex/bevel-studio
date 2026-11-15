@@ -1,0 +1,13 @@
+# Normalise text to LF in the repository; Windows checkouts may still use CRLF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.wasm binary
+*.stl binary
+
+package-lock.json -diff linguist-generated
+src-tauri/Cargo.lock -diff linguist-generated
