@@ -23,6 +23,8 @@ export interface ImportedMesh {
 export interface PreviewMesh {
   result: PreviewPayload;
   mesh: MeshData;
+  /** 0/1 per triangle of `mesh`; empty when the kernel could not attribute. */
+  bevelFaces: Uint8Array;
 }
 
 interface Pending {
@@ -168,6 +170,7 @@ export class EngineClient {
       job.resolve({
         result: message.result,
         mesh: meshFromBuffers(message.positions, message.indices),
+        bevelFaces: new Uint8Array(message.bevelFaces),
       });
     } catch (error) {
       job.reject(error instanceof Error ? error : new Error(String(error)));

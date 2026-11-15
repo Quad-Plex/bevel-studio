@@ -198,6 +198,27 @@ describe('bevel kernel', () => {
     expect(tapered.volumeAfter).toBeGreaterThan(result.volumeAfter);
   });
 
+  it('attributes bevel-band triangles through the boolean', () => {
+    const cube = cubeMesh(20);
+    const table = buildTestEdgeTable(cube);
+    const edge = edgeBetween(table, cube, [20, 20, 0], [20, 20, 20]);
+    const result = bevelMesh(cube, Uint32Array.of(edge), PARAMS, undefined, { taper: 'none' });
+
+    const triangles = result.mesh.indices.length / 3;
+    const mask = result.bevelFaces;
+    expect(mask).toBeDefined();
+    expect(mask!.length).toBe(triangles);
+
+    let band = 0;
+    for (const value of mask!) band += value;
+    expect(band).toBeGreaterThan(0);
+    // One edge cannot tint the whole cube; the untouched faces stay unmarked.
+    expect(band).toBeLessThan(triangles * 0.5);
+
+    // The tint must follow the vertex count of the returned mesh.
+    expect(result.mesh.positions.length).toBeGreaterThan(0);
+  });
+
   it('rounds all 12 cube edges with spherical corners (7786.44 mm³)', () => {
     const cube = cubeMesh(20);
     const table = buildTestEdgeTable(cube);

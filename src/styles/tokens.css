@@ -27,6 +27,8 @@
   --accent-fg: #06201a;
   --selection: #ffb65c;
   --selection-soft: rgba(255, 182, 92, 0.16);
+  /* bevel band on the shaded model; must read as "new surface", not an edge */
+  --bevel-face: #b18cff;
   --danger: #ff6b6b;
   --warning: #f5c26b;
   --success: #7de2c3;

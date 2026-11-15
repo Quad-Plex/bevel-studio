@@ -49,7 +49,7 @@ export function useLivePreview(): void {
       state.setError(null);
       getEngine()
         .preview(Uint32Array.from(ids), params)
-        .then(({ result, mesh }) => {
+        .then(({ result, mesh, bevelFaces }) => {
           if (cancelled) return;
           state.setPreview({
             mesh,
@@ -58,6 +58,7 @@ export function useLivePreview(): void {
             stale: false,
             warnings: result.warnings,
             selfIntersections: result.selfIntersections ?? 0,
+            bevelFaces,
           });
         })
         .catch((error: unknown) => {

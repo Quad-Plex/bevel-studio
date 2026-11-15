@@ -139,7 +139,9 @@ export class SceneController {
     };
 
     this.edgeView = new EdgeView(this.invalidate, readColorToken('--selection', '#ffb65c'));
-    this.meshView = new MeshView();
+    this.meshView = new MeshView({
+      bevelColor: readColorToken('--bevel-face', '#b18cff'),
+    });
     this.scene.add(this.meshView.object, this.edgeView.group);
 
     this.keyLight = new DirectionalLight(0xfff2e4, 1.25);
@@ -232,11 +234,19 @@ export class SceneController {
   /**
    * Replace the shaded mesh. `bounds` is optional; when omitted it is computed
    * from the positions. Geometry is never recentred or rescaled.
+   *
+   * `bevelFaces` is a 0/1 mask per triangle; 1 tints that face as the bevel
+   * band. The mask is ignored when it does not match the mesh.
    */
-  setMesh(mesh: MeshData | null, bounds?: Bounds, flat = false): void {
+  setMesh(
+    mesh: MeshData | null,
+    bounds?: Bounds,
+    flat = false,
+    bevelFaces?: Uint8Array | null,
+  ): void {
     if (this.disposed) return;
 
-    const computed = this.meshView.setMesh(mesh, { flat });
+    const computed = this.meshView.setMesh(mesh, { flat, bevelFaces });
     this.bounds = mesh ? (bounds ? boxFromBounds(bounds) : computed) : null;
 
     if (this.bounds) {
@@ -248,6 +258,13 @@ export class SceneController {
     this.updateLightRig(this.bounds);
 
     this.renderer.shadowMap.needsUpdate = true;
+    this.invalidate();
+  }
+
+  /** Toggle the triangle-edge overlay. */
+  setWireframe(on: boolean): void {
+    if (this.disposed) return;
+    this.meshView.setWireframe(on);
     this.invalidate();
   }
 

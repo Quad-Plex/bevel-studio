@@ -15,6 +15,8 @@ export function Inspector() {
   const phase = useApp((state) => state.phase);
   const showPreview = useApp((state) => state.showPreview);
   const setShowPreview = useApp((state) => state.setShowPreview);
+  const showWireframe = useApp((state) => state.showWireframe);
+  const setShowWireframe = useApp((state) => state.setShowWireframe);
 
   if (!meta) return null;
 
@@ -85,6 +87,12 @@ export function Inspector() {
         checked={params.smoothing === 'creased'}
         onChange={(on) => setParams({ smoothing: on ? 'creased' : 'flat' })}
         description="Creased at 30°, so flat faces stay flat."
+      />
+      <Toggle
+        label="Wireframe"
+        checked={showWireframe}
+        onChange={setShowWireframe}
+        description="Show triangle edges over the shaded model (W)."
       />
       <Toggle
         label="Show result"

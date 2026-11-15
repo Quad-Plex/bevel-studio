@@ -10,7 +10,7 @@ through React.
 | File | Role |
 |---|---|
 | `scene.ts` | `SceneController`: renderer, Z-up camera, orbit controls, studio rig, shadows, render-on-demand, framing |
-| `meshView.ts` | `MeshView`: zero-copy `BufferGeometry`, 30° creased normals, `MeshStandardMaterial` |
+| `meshView.ts` | `MeshView`: zero-copy `BufferGeometry`, 30° creased normals, bevel-band tint, wireframe overlay |
 | `edgeView.ts` | `EdgeView`: thin all-edge layer + capped fat selected-edge layer |
 | `import.ts` | `useStlImport`: file picker, drop handling, parse + `computeBasicMeta`, loading yield, errors |
 | `registry.ts` | `getActiveViewport()` — the live controller, or `null` |
@@ -54,7 +54,8 @@ class SceneController {
   readonly edgeView: EdgeView;
   readonly domElement: HTMLCanvasElement;
 
-  setMesh(mesh: MeshData | null, bounds?: Bounds): void;
+  setMesh(mesh: MeshData | null, bounds?: Bounds, flat?: boolean, bevelFaces?: Uint8Array | null): void;
+  setWireframe(on: boolean): void;
   setEdges(table: EdgeTable | null, selection: Uint8Array | null): void;
   setSelection(selection: Uint8Array | null): void;
   frame(bounds?: Bounds, durationMs?: number): void;
@@ -74,8 +75,8 @@ class SceneController {
   pointer up. Keyboard handling for tools belongs to the selection layer.
 - **Picking:** `screenToRay(clientX, clientY)` returns a world-space `Ray` in
   model space. Pass a reusable `Ray` as the third argument to avoid allocations.
-  Build the BVH from `meshView.object.geometry` (it is the displayed, creased
-  geometry) or from the store's `MeshData`; both share coordinates.
+  `picking.ts` raycasts against `meshView.object.geometry`, which is the
+  displayed creased geometry; the store's `MeshData` shares its coordinates.
 - **Overlay:** `setEdges(table, selection)` is the entry point. The mask is one
   byte per edge id. Passing the same `EdgeTable` object again only refreshes the
   selection buffer — a click or paint stroke never rebuilds the base layer.
@@ -93,9 +94,19 @@ class SceneController {
 
 `setMesh` disposes the previous geometry and uploads the new typed arrays
 directly. It never mutates or copies `positions` / `indices`. `bounds` is
-optional (the store's `meta.bbox` saves one pass over the vertices). The
-`Viewport` component hides the base edge overlay while a bevel preview mesh is
-shown, because the preview's topology differs from the edge table's.
+optional (the store's `meta.bbox` saves one pass over the vertices).
+
+The optional `bevelFaces` mask (one byte per triangle, 1 = cut-solid face) adds
+a second mesh that reuses the same vertex attributes and draws only those
+triangles with the `--bevel-face` material. Nothing is duplicated except the
+index list, so the tint costs one extra draw call, not another copy of the mesh.
+
+The edge overlay stays visible during preview: the selection lives on the base
+mesh and hiding it would make the marked edges impossible to refine.
+
+`setWireframe(true)` shows the triangle edges of the displayed geometry as a
+cheap overlay (shared geometry, `wireframe` material). It does not rebuild the
+mesh and the setting survives a preview update.
 
 ## Import
 

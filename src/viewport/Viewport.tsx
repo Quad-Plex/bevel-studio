@@ -30,7 +30,9 @@ export function Viewport() {
 
   const baseMesh = useApp((state) => state.mesh);
   const previewMesh = useApp((state) => state.preview?.mesh ?? null);
+  const previewBevelFaces = useApp((state) => state.preview?.bevelFaces ?? null);
   const showPreview = useApp((state) => state.showPreview);
+  const showWireframe = useApp((state) => state.showWireframe);
   const meta = useApp((state) => state.meta);
   const edges = useApp((state) => state.edges);
   const selected = useApp((state) => state.selected);
@@ -68,6 +70,7 @@ export function Viewport() {
     controllerRef.current = controller;
     fittedMesh.current = null;
     setActiveViewport(controller);
+    controller.setWireframe(useApp.getState().showWireframe);
 
     return () => {
       controllerRef.current = null;
@@ -105,7 +108,12 @@ export function Viewport() {
       }
 
       try {
-        current.setMesh(mesh, isBaseMesh ? meta?.bbox : undefined, smoothing === 'flat');
+        current.setMesh(
+          mesh,
+          isBaseMesh ? meta?.bbox : undefined,
+          smoothing === 'flat',
+          isBaseMesh ? null : previewBevelFaces,
+        );
         if (isBaseMesh && baseMesh && fittedMesh.current !== baseMesh) {
           fittedMesh.current = baseMesh;
           current.frame(meta?.bbox);
@@ -119,7 +127,11 @@ export function Viewport() {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [baseMesh, previewMesh, meta, showPreview, smoothing]);
+  }, [baseMesh, previewMesh, previewBevelFaces, meta, showPreview, smoothing]);
+
+  useEffect(() => {
+    controllerRef.current?.setWireframe(showWireframe);
+  }, [showWireframe]);
 
   // The overlay stays visible while previewing: the selection lives on the base
   // mesh, and hiding it would make the marked edges impossible to refine.
@@ -132,11 +144,12 @@ export function Viewport() {
     if (!storeError || phase === 'importing') setDismissedError(null);
   }, [storeError, phase]);
 
-  // F refits the model (or the current bounds).
+  // F refits the model; W toggles the wireframe overlay.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key !== 'f' && event.key !== 'F') return;
+      const key = event.key.toLowerCase();
+      if (key !== 'f' && key !== 'w') return;
 
       const target = event.target as HTMLElement | null;
       if (
@@ -150,7 +163,12 @@ export function Viewport() {
       }
 
       event.preventDefault();
-      controllerRef.current?.frame();
+      if (key === 'f') {
+        controllerRef.current?.frame();
+      } else {
+        const state = useApp.getState();
+        state.setShowWireframe(!state.showWireframe);
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);

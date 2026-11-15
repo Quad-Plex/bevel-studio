@@ -19,6 +19,8 @@ export interface PreviewState {
   warnings: MeshWarning[];
   /** Crossings reported by the kernel; export is refused while this is > 0. */
   selfIntersections: number;
+  /** 0/1 per triangle; 1 marks a face created by the bevel cut. */
+  bevelFaces: Uint8Array;
 }
 
 export interface AppStore {
@@ -34,6 +36,7 @@ export interface AppStore {
   params: BevelParams;
   preview: PreviewState | null;
   showPreview: boolean;
+  showWireframe: boolean;
   progress: { stage: string; value: number } | null;
   error: string | null;
 
@@ -57,6 +60,7 @@ export interface AppStore {
   setParams(patch: Partial<BevelParams>): void;
   setPreview(preview: PreviewState | null): void;
   setShowPreview(on: boolean): void;
+  setShowWireframe(on: boolean): void;
   setError(message: string | null): void;
   setBeveling(on: boolean): void;
   setProgress(progress: { stage: string; value: number } | null): void;
@@ -74,6 +78,7 @@ export const useApp = create<AppStore>((set, get) => ({
   params: DEFAULT_BEVEL,
   preview: null,
   showPreview: true,
+  showWireframe: false,
   progress: null,
   error: null,
 
@@ -151,6 +156,7 @@ export const useApp = create<AppStore>((set, get) => ({
   setParams: (patch) => set((s) => ({ params: { ...s.params, ...patch } })),
   setPreview: (preview) => set({ preview }),
   setShowPreview: (showPreview) => set({ showPreview }),
+  setShowWireframe: (showWireframe) => set({ showWireframe }),
   setError: (error) => set({ error }),
   setBeveling: (on) =>
     set((state) => {
@@ -168,6 +174,7 @@ export const useApp = create<AppStore>((set, get) => ({
       warnings: [],
       selected: null,
       preview: null,
+      showWireframe: false,
       progress: null,
       error: null,
     }),

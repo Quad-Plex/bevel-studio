@@ -37,7 +37,7 @@ export interface EdgeBuffers {
 }
 
 export type ImportPayload = Omit<AnalysisResult, 'edges'>;
-export type PreviewPayload = Omit<BevelResult, 'mesh'>;
+export type PreviewPayload = Omit<BevelResult, 'mesh' | 'bevelFaces'>;
 
 export type WorkerResponse =
   | {
@@ -55,6 +55,8 @@ export type WorkerResponse =
       result: PreviewPayload;
       positions: ArrayBuffer;
       indices: ArrayBuffer;
+      /** 0/1 per triangle; 1 marks a bevel-band face. */
+      bevelFaces: ArrayBuffer;
     }
   | { id: number; type: 'exported'; bytes: ArrayBuffer; name: string }
   | { id: number; type: 'progress'; stage: string; value: number; epoch: number }

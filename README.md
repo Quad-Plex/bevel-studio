@@ -24,7 +24,10 @@ desktop build wraps the same web app in a Tauri shell.
 - **Selection** — click, right-click erase, drag to paint, `A` for all
   candidates, `Ctrl+Z` / `Ctrl+Shift+Z` to undo and redo, `F` to refit.
 - **Bevel** — width, segments and profile with a real rolling-ball cut solid
-  and a Manifold WASM boolean, previewed live in a worker.
+  and a Manifold WASM boolean, previewed live in a worker. The generated band
+  is tinted light purple so the fillet reads apart from the untouched surface.
+- **View** — toggle a triangle wireframe (`W`) over the shaded model, and force
+  flat or creased shading from the inspector.
 - **Export** — binary STL in the input's units and origin, blocked when the
   result is not watertight.
 

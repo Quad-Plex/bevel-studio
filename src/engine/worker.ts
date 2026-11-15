@@ -105,9 +105,10 @@ async function preview(request: Extract<WorkerRequest, { type: 'preview' }>): Pr
   progress('Building bevel', 0.4);
   const result = bevelMesh(source, request.edges, request.params, edgeTable?.maxWidth);
 
-  const { mesh, ...payload } = result;
+  const { mesh, bevelFaces, ...payload } = result;
   const positions = mesh.positions.slice();
   const indices = mesh.indices.slice();
+  const faces = bevelFaces ? bevelFaces.slice() : new Uint8Array(0);
 
   progress('Ready', 1);
   post(
@@ -117,8 +118,9 @@ async function preview(request: Extract<WorkerRequest, { type: 'preview' }>): Pr
       result: payload,
       positions: positions.buffer,
       indices: indices.buffer,
+      bevelFaces: faces.buffer,
     },
-    [positions.buffer, indices.buffer],
+    [positions.buffer, indices.buffer, faces.buffer],
   );
 }
 

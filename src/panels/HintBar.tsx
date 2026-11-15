@@ -12,6 +12,7 @@ const HINTS: Hint[] = [
   { keys: ['Wheel'], label: 'Zoom' },
   { keys: ['A'], label: 'Select all' },
   { keys: ['F'], label: 'Fit' },
+  { keys: ['W'], label: 'Wireframe' },
   { keys: ['Ctrl', 'Z'], label: 'Undo' },
 ];
 

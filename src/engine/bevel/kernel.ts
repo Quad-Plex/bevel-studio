@@ -45,6 +45,12 @@ import {
 const KERNEL_NAME = 'manifold-3d 3.5.5';
 const WELD_TOLERANCE = 1e-4;
 const RETRY_INSET = 1e-4;
+/**
+ * faceID stamped on every base triangle. Manifold keeps faceIDs through
+ * booleans, so a triangle that still carries this value after the subtract is
+ * untouched base surface; everything else was created by a cut solid.
+ */
+const BASE_FACE_ID = 0x7fffffff;
 
 let wasm: ManifoldToplevel | null = null;
 let loading: Promise<void> | null = null;
@@ -118,7 +124,7 @@ function topologyFor(mesh: MeshData): CachedMesh {
   if (hit) return hit;
   const instance = requireWasm();
   const topo = buildTopology(mesh);
-  const base = meshToManifold(mesh);
+  const base = meshToManifold(mesh, BASE_FACE_ID);
   const baseStatus = safeStatus(base);
   const baseVolume = safeVolume(base);
   const entry: CachedMesh = { topo, base, baseStatus, baseVolume, baseShells: null };
@@ -175,12 +181,15 @@ function errorMessage(error: unknown): string {
 // --- mesh <-> Manifold ------------------------------------------------------
 
 /** Build a Manifold from an indexed triangle mesh. Throws if it is not one. */
-export function meshToManifold(mesh: MeshData): Manifold {
+export function meshToManifold(mesh: MeshData, faceId?: number): Manifold {
   const instance = requireWasm();
   const gl = new instance.Mesh({
     numProp: 3,
     vertProperties: mesh.positions,
     triVerts: mesh.indices,
+    ...(faceId === undefined
+      ? {}
+      : { faceID: new Uint32Array(mesh.indices.length / 3).fill(faceId) }),
   });
   try {
     return new instance.Manifold(gl);
@@ -192,6 +201,17 @@ export function meshToManifold(mesh: MeshData): Manifold {
 
 /** Plain MeshData from a Manifold; drops any extra vertex properties. */
 export function manifoldToMesh(manifold: Manifold): MeshData {
+  return manifoldToMeshWithFaces(manifold).mesh;
+}
+
+/**
+ * MeshData plus the per-triangle face IDs Manifold carried through the
+ * boolean. `null` when the result has no attribution.
+ */
+function manifoldToMeshWithFaces(manifold: Manifold): {
+  mesh: MeshData;
+  faceIds: Uint32Array | null;
+} {
   const out = manifold.getMesh();
   try {
     const np = out.numProp;
@@ -202,11 +222,23 @@ export function manifoldToMesh(manifold: Manifold): MeshData {
       positions[i * 3 + 1] = out.vertProperties[i * np + 1];
       positions[i * 3 + 2] = out.vertProperties[i * np + 2];
     }
-    return { positions, indices: new Uint32Array(out.triVerts) };
+    const indices = new Uint32Array(out.triVerts);
+    const triangles = indices.length / 3;
+    const faceIds =
+      out.faceID && out.faceID.length === triangles ? new Uint32Array(out.faceID) : null;
+    return { mesh: { positions, indices }, faceIds };
   } finally {
     // getMesh() returns a WASM-backed Mesh that is never garbage collected.
     (out as unknown as { delete?: () => void }).delete?.();
   }
+}
+
+/** 1 for cut-solid triangles, 0 for untouched base surface. */
+function bevelMask(faceIds: Uint32Array | null, triangles: number): Uint8Array | undefined {
+  if (!faceIds || faceIds.length !== triangles) return undefined;
+  const mask = new Uint8Array(triangles);
+  for (let i = 0; i < triangles; i++) mask[i] = faceIds[i] === BASE_FACE_ID ? 0 : 1;
+  return mask;
 }
 
 /**
@@ -353,6 +385,8 @@ interface CornerCandidate {
 interface CleanupResult {
   manifold: Manifold;
   mesh: MeshData;
+  /** per-triangle face IDs parallel to `mesh`, when attribution survived */
+  faceIds: Uint32Array | null;
   status: ErrorStatus;
   shells: number;
   volume: number;
@@ -386,10 +420,16 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
   // CSG leaves the exact input surface untouched; the weld below merges the
   // 1e-4 slivers. A global `simplify()` was tried and removed: it decimates
   // flat regions (1.08 M → 4 200 triangles) and is unit-dependent.
-  const source = manifoldToMesh(out);
-  const welded = weldMesh(source.positions, source.indices, WELD_TOLERANCE);
-  const weldedVerts = source.positions.length / 3 - welded.positions.length / 3;
+  const source = manifoldToMeshWithFaces(out);
+  const welded = weldMesh(source.mesh.positions, source.mesh.indices, WELD_TOLERANCE);
+  const weldedVerts = source.mesh.positions.length / 3 - welded.positions.length / 3;
   const shells = Math.max(1, keep.length || parts.length);
+  // weldMesh only remaps vertex ids, so triangle order (and the parallel face
+  // IDs) survive the weld and can be handed to the rebuilt Manifold.
+  const weldedFaceIds =
+    source.faceIds && source.faceIds.length === welded.indices.length / 3
+      ? source.faceIds
+      : null;
 
   let rebuilt: Manifold | null = null;
   try {
@@ -397,6 +437,7 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
       numProp: 3,
       vertProperties: welded.positions,
       triVerts: welded.indices,
+      ...(weldedFaceIds ? { faceID: weldedFaceIds } : {}),
     });
     rebuilt = new instance.Manifold(gl);
   } catch {
@@ -404,9 +445,11 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
   }
 
   if (rebuilt && safeStatus(rebuilt) === 'NoError') {
+    const final = manifoldToMeshWithFaces(rebuilt);
     return {
       manifold: rebuilt,
-      mesh: manifoldToMesh(rebuilt),
+      mesh: final.mesh,
+      faceIds: final.faceIds,
       status: 'NoError',
       shells,
       volume: safeVolume(rebuilt),
@@ -418,7 +461,8 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
 
   return {
     manifold: out,
-    mesh: source,
+    mesh: source.mesh,
+    faceIds: source.faceIds,
     status: rebuilt ? safeStatus(rebuilt) : 'NotManifold',
     shells,
     volume: safeVolume(out),
@@ -801,6 +845,7 @@ export function bevelMesh(
       return {
         manifold: base,
         mesh,
+        faceIds: null,
         status: cached.baseStatus,
         shells: baseShells(cached),
         volume: volumeBefore,
@@ -826,6 +871,7 @@ export function bevelMesh(
       return {
         manifold: raw,
         mesh: rawMesh,
+        faceIds: null,
         status: rawStatus,
         shells: 1,
         volume: safeVolume(raw),
@@ -853,6 +899,7 @@ export function bevelMesh(
       return {
         manifold: raw,
         mesh: rawMesh,
+        faceIds: null,
         status: 'NoError',
         shells: 1,
         volume: safeVolume(raw),
@@ -995,6 +1042,7 @@ export function bevelMesh(
     volumeAfter: chosen.volume,
     manifold: chosen.ok,
     selfIntersections,
+    bevelFaces: bevelMask(chosen.faceIds, triangleCount),
   };
 }
 

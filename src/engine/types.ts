@@ -131,6 +131,12 @@ export interface BevelResult {
   timings: { buildMs: number; booleanMs: number; totalMs: number };
   /** Triangle pairs passing through each other; 0 is the only safe value. */
   selfIntersections?: number;
+  /**
+   * One byte per result triangle: 1 when the triangle was created by a cut
+   * solid (the bevel band), 0 when it is untouched base surface. Absent when
+   * the kernel could not attribute faces, in which case nothing is tinted.
+   */
+  bevelFaces?: Uint8Array;
 }
 
 export interface ImportResult extends AnalysisResult {
