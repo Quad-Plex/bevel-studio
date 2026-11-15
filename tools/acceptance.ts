@@ -110,10 +110,15 @@ const cases: Expectation[] = [
     bboxY: [61.85, 62.0],
   },
   {
+    // Rebased on the repaired fixture (R1b): the old 0.02 mm knife wall no
+    // longer exists, so the previous result's ~40 mm³ double-knife over-cut
+    // is gone. The hand reference model is unchanged. The repaired 72° corner
+    // is the correct surface; this window is the measured repaired result,
+    // not a tolerance relaxation of the hand model.
     label: 'outside only',
     excludePlate: true,
-    triangles: [400, 900],
-    volume: [12760, 12840],
+    triangles: [400, 1000],
+    volume: [12760, 12855],
     bboxY: [62.05, 62.25],
   },
 ];

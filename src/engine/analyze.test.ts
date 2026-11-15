@@ -42,16 +42,17 @@ describe('hook-base.stl', () => {
     expect(parsed.weldedVertices).toBe(348);
 
     const result = analyzeMesh(parsed.mesh, 'hook-base.stl');
-    expect(result.meta.triangles).toBe(140);
-    expect(result.meta.vertices).toBe(72);
-    expect(result.meta.edges).toBe(210);
-    expect(result.edges.count).toBe(210);
+    // R1b collapses the 0.02 mm-wide, 35 mm-long wall at the notch.
+    expect(result.meta.triangles).toBe(126);
+    expect(result.meta.vertices).toBe(65);
+    expect(result.meta.edges).toBe(189);
+    expect(result.edges.count).toBe(189);
 
-    expect(countFlags(result.edges.flags, EDGE_CONVEX)).toBe(87);
-    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(15);
-    expect(countFlags(result.edges.flags, EDGE_CANDIDATE)).toBe(77);
+    expect(countFlags(result.edges.flags, EDGE_CONVEX)).toBe(79);
+    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(13);
+    expect(countFlags(result.edges.flags, EDGE_CANDIDATE)).toBe(68);
 
-    expect(Math.abs(result.meta.volume - 12871.8)).toBeLessThanOrEqual(0.05);
+    expect(Math.abs(result.meta.volume - 12871.36)).toBeLessThanOrEqual(0.05);
     expect(result.meta.bbox.size[0]).toBeCloseTo(47.88, 2);
     expect(result.meta.bbox.size[1]).toBeCloseTo(62.15, 2);
     expect(result.meta.bbox.size[2]).toBeCloseTo(35.0, 2);
@@ -63,7 +64,8 @@ describe('hook-base.stl', () => {
     expect(result.meta.nonManifoldEdges).toBe(0);
     expect(result.meta.degenerateTriangles).toBe(0);
     expect(result.meta.flippedTriangles).toBe(0);
-    expect(result.repairs).toEqual([]);
+    expect(result.repairs.map((record) => record.code)).toEqual(['sliver']);
+    expect(result.repairs[0].count).toBe(14);
     expect(result.warnings).toEqual([]);
   });
 
@@ -84,13 +86,13 @@ describe('hook-reference.stl', () => {
     expect(parsed.mesh.positions.length / 3).toBe(329);
 
     const result = analyzeMesh(parsed.mesh, 'hook-reference.stl');
-    expect(result.meta.triangles).toBe(654);
-    expect(result.meta.vertices).toBe(329);
-    expect(result.meta.edges).toBe(981);
-    expect(result.edges.count).toBe(981);
-    expect(countFlags(result.edges.flags, EDGE_CONVEX)).toBe(582);
-    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(176);
-    expect(Math.abs(result.meta.volume - 12788.47)).toBeLessThanOrEqual(0.05);
+    expect(result.meta.triangles).toBe(650);
+    expect(result.meta.vertices).toBe(327);
+    expect(result.meta.edges).toBe(975);
+    expect(result.edges.count).toBe(975);
+    expect(countFlags(result.edges.flags, EDGE_CONVEX)).toBe(580);
+    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(175);
+    expect(Math.abs(result.meta.volume - 12788.03)).toBeLessThanOrEqual(0.05);
     expect(result.meta.watertight).toBe(true);
     expect(result.meta.shells).toBe(1);
     expect(result.meta.genus).toBe(0);

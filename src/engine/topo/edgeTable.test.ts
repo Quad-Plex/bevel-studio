@@ -211,7 +211,10 @@ describe('hook maxWidth', () => {
     expect(new Set(widths.map((value) => value.toFixed(6))).size).toBeGreaterThan(10);
     expect(median).toBeGreaterThan(0.5);
     expect(max).toBeGreaterThan(1.5);
-    expect(max).toBeGreaterThan(min * 100);
+    // Sliver collapse removed the 0.001 mm wall that used to make the global
+    // minimum ~100x smaller than the maximum; the spread remains per edge.
+    expect(min).toBeLessThan(0.1);
+    expect(max).toBeGreaterThan(min * 20);
   });
 
   it('has no NaN widths on the reference mesh', () => {

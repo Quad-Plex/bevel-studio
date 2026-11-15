@@ -53,6 +53,7 @@ export const EDGE_CREASE = 1 << 5;
 
 export type RepairCode =
   | 'weld'
+  | 'sliver'
   | 'degenerate'
   | 'duplicate'
   | 'flipped'

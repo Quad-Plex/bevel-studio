@@ -22,6 +22,11 @@ All notable changes to this project are documented here. The format follows
   meet at an object corner instead of leaving a sharp ridge.
 - Cut-solid side walls are inset by 1e-3 mm so the boolean never sees them
   coplanar with the base faces.
+- Corrections for the reference model's 0.02 mm sliver wall: the repair
+  pipeline collapses sliver faces, so the bend-to-plate junction is a real edge
+  and is beveled instead of being skipped as a narrow knife edge.
+- A smooth chain of short segments shares one clamped width, so per-edge sweep
+  caps no longer scallop the band at large widths.
 - Knife-edge fillets fade over their own footprint at cap faces instead of
   ending in a 90° side wall (the notch step on the reference hook).
 - The boolean result is welded at 1e-3 mm, and sub-weld contacts are tested as

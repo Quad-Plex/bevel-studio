@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parseStl } from '../io/stl';
 import { edgeKey, keyA, keyB, orderEdges } from '../topo/edgeOrder';
-import { DEFAULT_BEVEL, type MeshData } from '../types';
+import { analyzeParsedStl } from '../analyze';
+import { DEFAULT_BEVEL, EDGE_CANDIDATE, type MeshData } from '../types';
 import { bevelMesh, initKernel, meshToStl } from './kernel';
 import { buildTopology } from './topology';
 
@@ -270,6 +271,12 @@ function loadHook(): MeshData {
   return parseStl(buffer, 1e-4).mesh;
 }
 
+function loadAnalyzedHook() {
+  const file = readFileSync(resolve(process.cwd(), 'public/fixtures/hook-base.stl'));
+  const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength) as ArrayBuffer;
+  return analyzeParsedStl(parseStl(buffer, 1e-4), 'hook-base.stl');
+}
+
 const PARAMS = { ...DEFAULT_BEVEL, width: 2, segments: 4, profile: 0.5, clampOverlap: false };
 const HOOK_PARAMS = { ...DEFAULT_BEVEL, width: 0.5, segments: 4, profile: 0.5, clampOverlap: false };
 
@@ -377,6 +384,93 @@ describe('bevel kernel', () => {
     expect(result.selfIntersections).toBe(0);
   });
 
+  it('collapses the notch sliver and bevels its junction at width 1.458', () => {
+    const analyzed = loadAnalyzedHook();
+    const mesh = analyzed.mesh;
+    const p = mesh.positions;
+    const idx = mesh.indices;
+    // No sub-0.05 mm-altitude face may survive in the 0.02 mm wall box.
+    let slivers = 0;
+    for (let t = 0; t < idx.length / 3; t++) {
+      const q = [0, 1, 2].map((k) => {
+        const v = idx[t * 3 + k] * 3;
+        return [p[v], p[v + 1], p[v + 2]];
+      });
+      if (!q.every((v) => v[0] > 12.7 && v[0] < 13.0 && v[1] > 35.0 && v[1] < 35.5)) continue;
+      const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const cross = (a: number[], b: number[]) => [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+      ];
+      const len = (a: number[]) => Math.hypot(a[0], a[1], a[2]);
+      const area2 = len(cross(sub(q[1], q[0]), sub(q[2], q[0])));
+      const longest = Math.max(
+        len(sub(q[1], q[0])),
+        len(sub(q[2], q[1])),
+        len(sub(q[0], q[2])),
+      );
+      if (area2 / longest < 0.05) slivers++;
+    }
+    expect(slivers).toBe(0);
+
+    const junction: number[] = [];
+    for (let i = 0; i < analyzed.edges.count; i++) {
+      if (!(analyzed.edges.flags[i] & EDGE_CANDIDATE)) continue;
+      const o = i * 6;
+      const mx = (analyzed.edges.position[o] + analyzed.edges.position[o + 3]) / 2;
+      const my = (analyzed.edges.position[o + 1] + analyzed.edges.position[o + 4]) / 2;
+      if (mx > 12.7 && mx < 13.0 && my > 35.0 && my < 35.5) junction.push(i);
+    }
+    expect(junction.length).toBe(1);
+    expect(analyzed.edges.maxWidth[junction[0]]).toBeGreaterThan(0.5);
+
+    const ids: number[] = [];
+    for (let i = 0; i < analyzed.edges.count; i++) {
+      if (analyzed.edges.flags[i] & EDGE_CANDIDATE) ids.push(i);
+    }
+    const result = bevelMesh(
+      mesh,
+      Uint32Array.from(ids),
+      { ...DEFAULT_BEVEL, width: 1.458, segments: 1, clampOverlap: true },
+      analyzed.edges.maxWidth,
+    );
+    expect(result.status).toBe('NoError');
+    expect(result.manifold).toBe(true);
+    const index = ids.indexOf(junction[0]);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(result.appliedWidth[index]).toBeGreaterThan(0);
+
+    // Adjacent sweeps must meet at one radius on every 2-edge chain vertex.
+    const endWidths = result.endWidths;
+    const endTapers = result.endTapers;
+    expect(endWidths).toBeDefined();
+    const atVertex = new Map<string, { w: number; taper: boolean }[]>();
+    const keyOf = (x: number, y: number, z: number) =>
+      `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
+    for (let i = 0; i < ids.length; i++) {
+      // An edge that fades at either end is not a constant-width chain member.
+      if (endTapers![i * 2] || endTapers![i * 2 + 1]) continue;
+      const o = ids[i] * 6;
+      const a = keyOf(analyzed.edges.position[o], analyzed.edges.position[o + 1], analyzed.edges.position[o + 2]);
+      const b = keyOf(analyzed.edges.position[o + 3], analyzed.edges.position[o + 4], analyzed.edges.position[o + 5]);
+      const add = (key: string, w: number) => {
+        const list = atVertex.get(key);
+        if (list) list.push({ w, taper: false });
+        else atVertex.set(key, [{ w, taper: false }]);
+      };
+      add(a, endWidths![i * 2]);
+      add(b, endWidths![i * 2 + 1]);
+    }
+    let joints = 0;
+    for (const ends of atVertex.values()) {
+      if (ends.length !== 2 || ends.some((end) => end.w === 0)) continue;
+      joints++;
+      expect(Math.abs(ends[0].w - ends[1].w)).toBeLessThan(1e-6);
+    }
+    expect(joints).toBeGreaterThan(20);
+  });
+
   it('keeps the bevel band connected across the hook notch', () => {
     const hook = loadHook();
     const table = buildTestEdgeTable(hook);
@@ -472,6 +566,90 @@ describe('bevel kernel', () => {
       if (Math.hypot(mid[0] - 12.873, mid[1] - 35.257, mid[2] - 34.5) < 3) walls++;
     }
     expect(walls).toBe(0);
+  });
+
+  it('uses one safe width across a short-segment bend chain', () => {
+    // Match the app's import path: unpinned weld tolerance, analyzer widths.
+    const file = readFileSync(resolve(process.cwd(), 'public/fixtures/hook-base.stl'));
+    const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength) as ArrayBuffer;
+    const parsed = parseStl(buffer);
+    const analysis = analyzeParsedStl(parsed, 'hook');
+    const hook = analysis.mesh;
+    const ids: number[] = [];
+    for (let i = 0; i < analysis.edges.count; i++) {
+      if (analysis.edges.flags[i] & EDGE_CANDIDATE) ids.push(i);
+    }
+    const result = bevelMesh(
+      hook,
+      Uint32Array.from(ids),
+      { ...HOOK_PARAMS, width: 1.458, segments: 1, clampOverlap: true },
+      analysis.edges.maxWidth,
+    );
+
+    const position = analysis.edges.position;
+    const short: number[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const e = ids[i];
+      const length = Math.hypot(
+        position[e * 6 + 3] - position[e * 6],
+        position[e * 6 + 4] - position[e * 6 + 1],
+        position[e * 6 + 5] - position[e * 6 + 2],
+      );
+      const z0 = position[e * 6 + 2];
+      const z1 = position[e * 6 + 5];
+      const top = z0 > 34.9 && z1 > 34.9;
+      if (top && length > 0.45 && length < 0.6) short.push(e);
+    }
+    expect(short.length).toBe(3);
+    const beveled = short.filter((e) => result.appliedWidth[ids.indexOf(e)] > 0);
+    expect(beveled.length).toBeGreaterThan(1);
+
+    const shortWidths = beveled.map((e) => result.appliedWidth[ids.indexOf(e)]);
+    const narrowest = Math.min(...shortWidths);
+    expect(narrowest).toBeGreaterThan(0);
+    // The request is 1.458 mm; the short chain cannot carry it.
+    expect(narrowest).toBeLessThan(1.458 * 0.5);
+
+    // Every smooth continuation of the bend chain must use the same width;
+    // otherwise each short sweep caps at its own radius and the band scallops.
+    const v = analysis.edges.v;
+    const shortVertices = new Set<number>();
+    for (const e of beveled) {
+      shortVertices.add(v[e * 2]);
+      shortVertices.add(v[e * 2 + 1]);
+    }
+    const point = (vertex: number): number[] => [
+      position[vertex * 3],
+      position[vertex * 3 + 1],
+      position[vertex * 3 + 2],
+    ];
+    const smoothLimit = -Math.cos((30 * Math.PI) / 180);
+    for (const e of ids) {
+      if (short.includes(e)) continue;
+      const vertex = v[e * 2];
+      const other = v[e * 2 + 1];
+      if (!shortVertices.has(vertex) && !shortVertices.has(other)) continue;
+      const shared = shortVertices.has(vertex) ? vertex : other;
+      const index = ids.indexOf(e);
+      if (result.appliedWidth[index] <= 0) continue;
+
+      for (const s of beveled) {
+        if (!(v[s * 2] === shared || v[s * 2 + 1] === shared)) continue;
+        const a = point(shared);
+        const b = point(v[s * 2] === shared ? v[s * 2 + 1] : v[s * 2]);
+        const c = point(v[e * 2] === shared ? v[e * 2 + 1] : v[e * 2]);
+        const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        const dot =
+          (ab[0] * ac[0] + ab[1] * ac[1] + ab[2] * ac[2]) /
+          (Math.hypot(...ab) * Math.hypot(...ac));
+        if (dot < smoothLimit) {
+          // The neighbour belongs to the same smooth chain and must inherit
+          // the safe width instead of its own much larger per-edge limit.
+          expect(result.appliedWidth[index]).toBeLessThan(1.458 * 0.5);
+        }
+      }
+    }
   });
 
   it('bevels a chain of four short edges continuously without dropping a segment', () => {

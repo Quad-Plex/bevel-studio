@@ -8,6 +8,15 @@ export const WELD_TOLERANCE = 1e-4;
 export const MAX_HOLE_EDGES = 64;
 /** PLAN §4.2 R7: drop components below this fraction of total volume. */
 export const SMALL_SHELL_FRACTION = 0.001;
+/**
+ * A triangle whose shortest altitude is below this is a tessellation sliver,
+ * not a manufacturable face. Sliver walls in STL exports are typically a few
+ * hundredths of a millimetre wide; 0.05 mm is half the smallest feature the
+ * bevel kernel itself resolves (MICRO_EDGE).
+ */
+export const SLIVER_ALTITUDE = 0.05;
+/** Only edges this short are collapsed while removing sliver triangles. */
+export const SLIVER_EDGE = 0.05;
 
 export interface RepairStats {
   weldedVertices: number;
@@ -20,6 +29,10 @@ export interface RepairStats {
   droppedComponents: number;
   droppedVolume: number;
   windingConflicts: number;
+  /** vertices merged while collapsing sliver triangles */
+  sliverVertices: number;
+  /** triangles removed by the sliver collapse */
+  sliverTriangles: number;
 }
 
 export interface RepairResult {
@@ -53,6 +66,8 @@ export function repairMesh(input: MeshData): RepairResult {
     droppedComponents: 0,
     droppedVolume: 0,
     windingConflicts: 0,
+    sliverVertices: 0,
+    sliverTriangles: 0,
   };
 
   // R1 — weld at 1e-4 mm. parseStl already does this, so on its output this is
@@ -60,6 +75,15 @@ export function repairMesh(input: MeshData): RepairResult {
   const inputVertices = input.positions.length / 3;
   let mesh = weld(input.positions, input.indices, WELD_TOLERANCE);
   stats.weldedVertices = inputVertices - mesh.positions.length / 3;
+
+  // R1b — collapse tessellation slivers. The reference hook has a 35 mm wall
+  // only 0.02 mm wide; the two sides are separate candidate edges with tiny
+  // maxWidth, so the bevel used to vanish there. Merge the short edges of
+  // sub-0.05 mm-altitude triangles and drop the resulting degenerates.
+  const slivers = collapseSlivers(mesh);
+  mesh = slivers.mesh;
+  stats.sliverVertices = slivers.mergedVertices;
+  stats.sliverTriangles = slivers.removedTriangles;
 
   // R2 — degenerate triangles: repeated indices, non-finite coordinates, or
   // area below tolerance².
@@ -136,6 +160,13 @@ function buildRepairRecords(stats: RepairStats): RepairRecord[] {
       detail: `welded ${stats.weldedVertices} duplicate vertices`,
     });
   }
+  if (stats.sliverTriangles > 0) {
+    records.push({
+      code: 'sliver',
+      count: stats.sliverTriangles,
+      detail: `collapsed ${stats.sliverTriangles} sliver triangles (${stats.sliverVertices} vertices merged)`,
+    });
+  }
   if (stats.degenerateTriangles > 0) {
     records.push({
       code: 'degenerate',
@@ -179,6 +210,127 @@ function buildRepairRecords(stats: RepairStats): RepairRecord[] {
     });
   }
   return records;
+}
+
+// ---------------------------------------------------------------------------
+// R1b — sliver triangles
+// ---------------------------------------------------------------------------
+
+/**
+ * Collapse the shortest edge of triangles whose minimum altitude is below
+ * SLIVER_ALTITUDE. This is a targeted weld: only vertices joined by a short
+ * edge of an already-sliver triangle are merged, so unrelated surfaces that
+ * happen to pass within 0.05 mm are left alone. Merged vertices use the
+ * cluster centroid, then repeated-vertex triangles, duplicate faces and
+ * unused vertices are dropped in that order.
+ */
+function collapseSlivers(mesh: MeshData): {
+  mesh: MeshData;
+  mergedVertices: number;
+  removedTriangles: number;
+} {
+  const { positions, indices } = mesh;
+  const vertexCount = positions.length / 3;
+  const triCount = indices.length / 3;
+  if (vertexCount === 0 || triCount === 0) {
+    return { mesh, mergedVertices: 0, removedTriangles: 0 };
+  }
+
+  const union = new UnionFind(vertexCount);
+  let sliverTriangles = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const a = indices[t * 3];
+    const b = indices[t * 3 + 1];
+    const c = indices[t * 3 + 2];
+    const ax = positions[a * 3];
+    const ay = positions[a * 3 + 1];
+    const az = positions[a * 3 + 2];
+    const bx = positions[b * 3];
+    const by = positions[b * 3 + 1];
+    const bz = positions[b * 3 + 2];
+    const cx = positions[c * 3];
+    const cy = positions[c * 3 + 1];
+    const cz = positions[c * 3 + 2];
+
+    const ux = bx - ax;
+    const uy = by - ay;
+    const uz = bz - az;
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const vz = cz - az;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const area2 = Math.hypot(nx, ny, nz);
+    if (!(area2 > 0)) continue;
+
+    const ab = Math.hypot(bx - ax, by - ay, bz - az);
+    const bc = Math.hypot(cx - bx, cy - by, cz - bz);
+    const ca = Math.hypot(ax - cx, ay - cy, az - cz);
+    const longest = Math.max(ab, bc, ca);
+    if (!(longest > 0)) continue;
+    if (area2 / longest >= SLIVER_ALTITUDE) continue;
+
+    sliverTriangles++;
+    if (ab < SLIVER_EDGE) union.union(a, b);
+    if (bc < SLIVER_EDGE) union.union(b, c);
+    if (ca < SLIVER_EDGE) union.union(c, a);
+  }
+
+  if (sliverTriangles === 0) return { mesh, mergedVertices: 0, removedTriangles: 0 };
+
+  const counts = new Int32Array(vertexCount);
+  const sumX = new Float64Array(vertexCount);
+  const sumY = new Float64Array(vertexCount);
+  const sumZ = new Float64Array(vertexCount);
+  for (let v = 0; v < vertexCount; v++) {
+    const root = union.find(v);
+    counts[root]++;
+    sumX[root] += positions[v * 3];
+    sumY[root] += positions[v * 3 + 1];
+    sumZ[root] += positions[v * 3 + 2];
+  }
+
+  const rootToId = new Int32Array(vertexCount).fill(-1);
+  const newPositions = new Float32Array(vertexCount * 3);
+  let newVertexCount = 0;
+  for (let v = 0; v < vertexCount; v++) {
+    const root = union.find(v);
+    if (rootToId[root] >= 0) continue;
+    const id = newVertexCount++;
+    rootToId[root] = id;
+    const n = counts[root];
+    newPositions[id * 3] = sumX[root] / n;
+    newPositions[id * 3 + 1] = sumY[root] / n;
+    newPositions[id * 3 + 2] = sumZ[root] / n;
+  }
+
+  const newIndices: number[] = [];
+  for (let t = 0; t < triCount; t++) {
+    const a = rootToId[union.find(indices[t * 3])];
+    const b = rootToId[union.find(indices[t * 3 + 1])];
+    const c = rootToId[union.find(indices[t * 3 + 2])];
+    if (a === b || b === c || a === c) continue;
+    newIndices.push(a, b, c);
+  }
+
+  if (newVertexCount === vertexCount && newIndices.length === indices.length) {
+    return { mesh, mergedVertices: 0, removedTriangles: 0 };
+  }
+
+  let collapsed: MeshData = {
+    positions: newPositions.slice(0, newVertexCount * 3),
+    indices: new Uint32Array(newIndices),
+  };
+  collapsed = removeDuplicateFaces(collapsed).mesh;
+  collapsed = compactVertices(collapsed).mesh;
+
+  return {
+    mesh: collapsed,
+    mergedVertices: vertexCount - collapsed.positions.length / 3,
+    removedTriangles: triCount - collapsed.indices.length / 3,
+  };
 }
 
 // ---------------------------------------------------------------------------

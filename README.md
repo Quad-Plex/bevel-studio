@@ -132,6 +132,8 @@ instant. The 1 M import is dominated by the worker's repair pass.
 - Corners with more than three beveled edges, and the near-fold notch on the
   reference hook, are joined by mitred overlap. The band is continuous and
   watertight, but can show a crease at close range instead of a spherical blend.
+- With clamping off, a width far larger than the bend segments can still make
+  the band scallop; the clamps exist to prevent that.
 - Loop/ring and silhouette-sweep selection are not implemented; click and
   paint are.
 - Concave edges are supported as additive fillets. A near-folded concave edge

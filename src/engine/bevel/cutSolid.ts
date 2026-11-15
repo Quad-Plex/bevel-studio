@@ -50,6 +50,10 @@ export interface EdgeCutParams {
   taperA: number;
   /** taper length at B */
   taperB: number;
+  /** joint-consistent radius at A, default radius */
+  radiusA?: number;
+  /** joint-consistent radius at B */
+  radiusB?: number;
   /** stations used across each taper */
   taperStations: number;
   /** mm the section corner is pushed outside the two face planes */
@@ -244,6 +248,14 @@ function stationList(L: number, r: number, p: EdgeCutParams): Station[] {
   }
   const n = Math.max(1, Math.round(p.taperStations));
   const out: Station[] = [];
+  const rA = p.radiusA === undefined ? r : Math.max(0, Math.min(r, p.radiusA));
+  const rB = p.radiusB === undefined ? r : Math.max(0, Math.min(r, p.radiusB));
+
+  if (taperA <= 1e-9 && taperB <= 1e-9 && (Math.abs(rA - r) > 1e-9 || Math.abs(rB - r) > 1e-9)) {
+    out.push({ t: 0, rho: rA });
+    out.push({ t: L, rho: rB });
+    return out;
+  }
 
   if (taperA > 1e-9) {
     for (let k = 0; k <= n; k++) out.push({ t: (taperA * k) / n, rho: (r * k) / n });
