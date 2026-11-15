@@ -143,4 +143,4 @@ instant. The 1 M import is dominated by the worker's repair pass.
 
 ## License
 
-[MIT](LICENSE) © Bevel Studio contributors.
+[MIT](LICENSE)
