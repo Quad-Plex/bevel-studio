@@ -36,6 +36,10 @@ function bruteForceMaxWidth(mesh: MeshData, table: EdgeTable): Float32Array {
   const mid = new Float64Array(edgeCount * 3);
   const vMin = new Float64Array(vertexCount);
   vMin.fill(Infinity);
+  const vMinAny = new Float64Array(vertexCount);
+  vMinAny.fill(Infinity);
+  // mirrors the kernel's 0.05 mm micro-edge threshold in topo/build.ts
+  const MIN_CLAMP_EDGE = 0.05;
 
   for (let e = 0; e < edgeCount; e++) {
     const a = table.v[e * 2];
@@ -47,8 +51,12 @@ function bruteForceMaxWidth(mesh: MeshData, table: EdgeTable): Float32Array {
     const by = mesh.positions[b * 3 + 1];
     const bz = mesh.positions[b * 3 + 2];
     length[e] = Math.hypot(bx - ax, by - ay, bz - az);
-    if (length[e] < vMin[a]) vMin[a] = length[e];
-    if (length[e] < vMin[b]) vMin[b] = length[e];
+    if (length[e] < vMinAny[a]) vMinAny[a] = length[e];
+    if (length[e] < vMinAny[b]) vMinAny[b] = length[e];
+    if (length[e] >= MIN_CLAMP_EDGE) {
+      if (length[e] < vMin[a]) vMin[a] = length[e];
+      if (length[e] < vMin[b]) vMin[b] = length[e];
+    }
     mid[e * 3] = (ax + bx) * 0.5;
     mid[e * 3 + 1] = (ay + by) * 0.5;
     mid[e * 3 + 2] = (az + bz) * 0.5;
@@ -57,7 +65,9 @@ function bruteForceMaxWidth(mesh: MeshData, table: EdgeTable): Float32Array {
   for (let e = 0; e < edgeCount; e++) {
     const a = table.v[e * 2];
     const b = table.v[e * 2 + 1];
-    const incident = Math.min(vMin[a], vMin[b]);
+    const aMin = Number.isFinite(vMin[a]) ? vMin[a] : vMinAny[a];
+    const bMin = Number.isFinite(vMin[b]) ? vMin[b] : vMinAny[b];
+    const incident = Math.min(aMin, bMin, length[e]);
     let best = 0.5 * incident;
     let bestDist2 = incident * incident;
     for (let f = 0; f < edgeCount; f++) {
@@ -164,6 +174,27 @@ describe('maxWidth reference', () => {
 });
 
 describe('hook maxWidth', () => {
+  it('does not let a 0.001 mm tessellation edge clamp a 34 mm chain edge', () => {
+    const parsed = loadFixture('hook-base.stl');
+    const table = buildEdgeTable(parsed.mesh);
+    let checked = 0;
+    for (let e = 0; e < table.count; e++) {
+      const a = table.v[e * 2] * 3;
+      const b = table.v[e * 2 + 1] * 3;
+      const length = Math.hypot(
+        parsed.mesh.positions[b] - parsed.mesh.positions[a],
+        parsed.mesh.positions[b + 1] - parsed.mesh.positions[a + 1],
+        parsed.mesh.positions[b + 2] - parsed.mesh.positions[a + 2],
+      );
+      // The plate-notch rim edge is adjacent to the 0.001 mm collapsed edge.
+      if (Math.abs(length - 34.308) < 0.01) {
+        expect(table.maxWidth[e]).toBeGreaterThan(0.2);
+        checked++;
+      }
+    }
+    expect(checked).toBe(1);
+  });
+
   it('is per edge and never collapses to the global minimum', () => {
     const parsed = loadFixture('hook-base.stl');
     const result = analyzeMesh(parsed.mesh, 'hook-base.stl');

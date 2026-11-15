@@ -11,6 +11,22 @@ All notable changes to this project are documented here. The format follows
 - Bevel-band tint: triangles created by the cut solids are shaded light purple,
   so the fillet is distinguishable from the untouched surface.
 - Wireframe toggle for the shaded model, in the inspector and with `W`.
+- Concave edges are beveled as additive rolling-ball fillets; their faces are
+  tinted like cut bevels.
+
+### Fixed
+
+- Selected edge chains are beveled continuously: short segments are no longer
+  dropped, and joints keep their full radius instead of tapering into gaps.
+- Sweeps at a chain joint are extended by the miter length, so two 90° bevels
+  meet at an object corner instead of leaving a sharp ridge.
+- Cut-solid side walls are inset by 1e-3 mm so the boolean never sees them
+  coplanar with the base faces.
+- Knife-edge fillets fade over their own footprint at cap faces instead of
+  ending in a 90° side wall (the notch step on the reference hook).
+- The boolean result is welded at 1e-3 mm, and sub-weld contacts are tested as
+  coplanar rather than reported as crossings, so the all-convex hook selection
+  is exportable.
 
 ## [0.1.0] — 2026-11-15
 

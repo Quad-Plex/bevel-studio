@@ -126,13 +126,16 @@ instant. The 1 M import is dominated by the worker's repair pass.
 
 ## Known limitations
 
-- Beveling **all** convex edges also bevels the under-table plate of the
-  reference model, whose corners are too tight for the current corner
-  handling. Crossings are detected, flagged and export-blocked; deselect the
-  four plate-corner edges until the clamp is chain-consistent.
+- The all-convex reference selection exports cleanly at the default width.
+  At a 0.3 mm width with clamping off, two sub-micron coplanar slivers remain
+  at the plate corner; they are detected, flagged and export-blocked.
+- Corners with more than three beveled edges, and the near-fold notch on the
+  reference hook, are joined by mitred overlap. The band is continuous and
+  watertight, but can show a crease at close range instead of a spherical blend.
 - Loop/ring and silhouette-sweep selection are not implemented; click and
   paint are.
-- Concave edges are rejected with a warning by design.
+- Concave edges are supported as additive fillets. A near-folded concave edge
+  can add a lot of material at a large width; the width clamp is the guard.
 - Pointer picking is linear in triangle count, so painting on a
   1 M-triangle mesh is slow (no BVH yet).
 - WASM heap growth across repeated previews is not measured.

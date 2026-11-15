@@ -71,15 +71,31 @@ function trianglesIntersect(c: Float64Array, i: number, j: number): boolean {
   if (l1 < 1e-14 || l2 < 1e-14) return false; // degenerate triangle
 
   const eps = 1e-9;
+  /**
+   * Positions are float32 millimetres and the kernel welds the result at
+   * 1e-3 mm (WELD_TOLERANCE in kernel.ts). A vertex within that same distance
+   * of the other triangle's plane is part of the welded surface, not a
+   * crossing. Such pairs are classified as coplanar and go through the 2-D
+   * overlap test below instead of the 3-D SAT, which cannot tell a contact
+   * from a crossing. This is a classification scale, not a blanket
+   * intersection tolerance: a real crossing has vertices well on both sides.
+   */
+  const CONTACT_EPS = 1e-3;
   const sd = [D, E, F].map((v) => dot3(subV(v, A), n1) / l1);
-  if (sd.every((s) => s > eps) || sd.every((s) => s < -eps)) return false;
   const st = [A, B, C].map((v) => dot3(subV(v, D), n2) / l2);
-  if (st.every((s) => s > eps) || st.every((s) => s < -eps)) return false;
+  const coplanar =
+    sd.every((s) => Math.abs(s) <= CONTACT_EPS) &&
+    st.every((s) => Math.abs(s) <= CONTACT_EPS);
 
-  // coplanar: the 3-D axes all collapse, so test the 2-D outlines instead
-  if (sd.every((s) => Math.abs(s) <= eps) && st.every((s) => Math.abs(s) <= eps)) {
+  if (coplanar) {
+    // the 3-D axes all collapse, so test the 2-D outlines instead
     return coplanarOverlap2D([A, B, C], [D, E, F], n1);
   }
+
+  // A real crossing needs vertices strictly on both sides of the other plane.
+  // One-sided contact (an edge or vertex lying on the plane) is not a crossing.
+  if (Math.max(...sd) <= CONTACT_EPS || Math.min(...sd) >= -CONTACT_EPS) return false;
+  if (Math.max(...st) <= CONTACT_EPS || Math.min(...st) >= -CONTACT_EPS) return false;
 
   const axes: number[][] = [n1, n2];
   for (let a = 0; a < 3; a++) {

@@ -19,8 +19,8 @@ import { DEFAULT_BEVEL, EDGE_CONVEX, type MeshData } from '../src/engine/types';
 const SEGMENTS = Number(process.env.BENCH_SEGMENTS ?? 300); // 6 faces × 2 × N² triangles
 const SIZE = 300; // mm
 const BEVEL_EDGES = 400;
-// The kernel skips edges shorter than 4× the radius; subdivided cube edges are
-// one step long, so scale the radius to the tessellation.
+// The kernel caps a short edge with a termination at 0.45 × its length;
+// subdivided cube edges are one step long, so scale the radius to the tessellation.
 const bevelWidth = Math.min(2, (SIZE / SEGMENTS) * 0.15);
 
 function buildCube(segments: number, size: number): MeshData {

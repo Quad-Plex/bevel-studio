@@ -21,7 +21,7 @@ const EMPTY_GEOMETRY = new BufferGeometry();
 
 export interface MeshViewOptions {
   flat?: boolean;
-  /** 0/1 per triangle of `mesh`; 1 marks a face created by the bevel cut. */
+  /** 0/1 per triangle of `mesh`; 1 marks a face created by a bevel solid. */
   bevelFaces?: Uint8Array | null;
 }
 
@@ -40,7 +40,7 @@ export interface MeshViewTheme {
  * Three meshes share the same transform:
  * - `object` renders the whole surface;
  * - `bevelObject` reuses the same vertex buffers and draws only the triangles
- *   the kernel attributed to a cut solid, so the bevel band reads as a light
+ *   the kernel attributed to a bevel solid, so the bevel band reads as a light
  *   purple insert without rebuilding the mesh;
  * - `wireObject` draws the triangle edges for the wireframe toggle.
  */

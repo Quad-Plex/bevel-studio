@@ -17,6 +17,13 @@ const CANDIDATE_DEG = 20;
 const CREASE_DEG = 30;
 const MAX_WIDTH = 10;
 const MAX_RING = 64;
+/**
+ * Incident edges shorter than this do not constrain the clamp. The bevel
+ * kernel collapses edges below 0.05 mm and lets their neighbours bridge the
+ * gap; letting a 0.001 mm tessellation edge clamp a 35 mm chain edge to
+ * 0.0005 mm is what made the reference hook's bevel patchy.
+ */
+const MIN_CLAMP_EDGE = 0.05;
 
 /**
  * Build the canonical edge table for a repaired mesh.
@@ -145,7 +152,8 @@ function oppositeVertex(indices: Uint32Array, t: number, a: number, b: number): 
  * midpoints closer than the incident-edge term can lower the result, so the
  * search radius is that term. This is deliberately per edge: the spike showed
  * that a global minimum over a selection collapses to 0.002 mm on the
- * reference hook.
+ * reference hook. Incident edges below MIN_CLAMP_EDGE are ignored because the
+ * kernel bridges them instead of beveling them (see that constant).
  */
 export function computeMaxWidth(mesh: MeshData, topo: MeshTopology): Float32Array {
   const edgeCount = topo.edgeCount;
@@ -160,6 +168,8 @@ export function computeMaxWidth(mesh: MeshData, topo: MeshTopology): Float32Arra
   const mid = new Float64Array(edgeCount * 3);
   const vMin = new Float64Array(vertexCount);
   vMin.fill(Infinity);
+  const vMinAny = new Float64Array(vertexCount);
+  vMinAny.fill(Infinity);
 
   let lengthSum = 0;
   let minX = Infinity;
@@ -181,8 +191,12 @@ export function computeMaxWidth(mesh: MeshData, topo: MeshTopology): Float32Arra
     const len = Math.hypot(bx - ax, by - ay, bz - az);
     length[e] = len;
     lengthSum += len;
-    if (len < vMin[a]) vMin[a] = len;
-    if (len < vMin[b]) vMin[b] = len;
+    if (len < vMinAny[a]) vMinAny[a] = len;
+    if (len < vMinAny[b]) vMinAny[b] = len;
+    if (len >= MIN_CLAMP_EDGE) {
+      if (len < vMin[a]) vMin[a] = len;
+      if (len < vMin[b]) vMin[b] = len;
+    }
     mid[e * 3] = (ax + bx) * 0.5;
     mid[e * 3 + 1] = (ay + by) * 0.5;
     mid[e * 3 + 2] = (az + bz) * 0.5;
@@ -261,7 +275,11 @@ export function computeMaxWidth(mesh: MeshData, topo: MeshTopology): Float32Arra
 
     const a = v[e * 2];
     const b = v[e * 2 + 1];
-    const incident = Math.min(vMin[a], vMin[b]);
+    const aMin = Number.isFinite(vMin[a]) ? vMin[a] : vMinAny[a];
+    const bMin = Number.isFinite(vMin[b]) ? vMin[b] : vMinAny[b];
+    // The edge's own length always caps its width, exactly as when the
+    // unfiltered vMin included the edge itself.
+    const incident = Math.min(aMin, bMin, length[e]);
     if (!Number.isFinite(incident) || incident <= 0) {
       out[e] = 0;
       continue;

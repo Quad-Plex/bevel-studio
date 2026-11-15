@@ -1,13 +1,19 @@
 /**
  * Cut-solid construction for the rolling-ball bevel.
  *
- * For one convex edge A–B with adjacent outward face normals n1, n2 and radius
- * r, the solid to remove is the sweep of the 2-D sliver between the sharp edge
- * and the fillet arc. Perpendicular to the edge the sliver is bounded by the
- * two face traces (A→t1 and A→t2) and the arc of radius r centred at c, the
- * point at distance r inside both faces.
+ * For one edge A–B with adjacent outward face normals n1, n2 and radius r,
+ * the same 2-D sliver is used for both edge kinds:
  *
- *   m1 = -n1, m2 = -n2            (inward face normals, both ⟂ edge)
+ *   convex  — the sliver between the sharp edge and the fillet arc is removed.
+ *             Its rolling-ball centre lies inside the material, along the
+ *             bisector of the inward face normals m1 = -n1, m2 = -n2.
+ *   concave — the sliver between the sharp edge and the fillet arc is *added*.
+ *             The centre lies in the air wedge outside both faces, along the
+ *             bisector of the outward normals n1, n2.
+ *
+ * In both cases, with `m1, m2` the normals pointing from the edge towards the
+ * arc centre:
+ *
  *   c  = A + r·(m1 + m2)/(1 + m1·m2)
  *   t1 = foot of the perpendicular from c onto face 1
  *   t2 = foot of the perpendicular from c onto face 2
@@ -48,6 +54,8 @@ export interface EdgeCutParams {
   taperStations: number;
   /** mm the section corner is pushed outside the two face planes */
   extend: number;
+  /** true builds the additive fillet of a reflex (inside) edge */
+  concave?: boolean;
 }
 
 // --- tiny vector helpers ----------------------------------------------------
@@ -72,10 +80,13 @@ interface SectionFrame {
   cosHalf: number;
 }
 
-function sectionFrame(n1: Vec3, n2: Vec3, dRaw: Vec3): SectionFrame | null {
+function sectionFrame(n1: Vec3, n2: Vec3, dRaw: Vec3, concave: boolean): SectionFrame | null {
   const d = unit(dRaw);
-  let m1 = mul(n1, -1);
-  let m2 = mul(n2, -1);
+  // Convex: the fillet centre is inside the material, opposite the outward
+  // normals. Concave: it is in the air wedge, along the outward normals.
+  const sign = concave ? 1 : -1;
+  let m1 = mul(n1, sign);
+  let m2 = mul(n2, sign);
   // guard against float drift: both must be exactly perpendicular to the edge
   m1 = unit(sub(m1, mul(d, dot(m1, d))));
   m2 = unit(sub(m2, mul(d, dot(m2, d))));
@@ -152,7 +163,7 @@ export function buildEdgeCutSolid(
   const L = len(ab);
   if (!(L > 1e-6)) return null;
   const d = unit(ab);
-  const frame = sectionFrame(n1, n2, d);
+  const frame = sectionFrame(n1, n2, d, params.concave === true);
   if (!frame) return null;
 
   const r = params.radius;
@@ -286,11 +297,17 @@ function orientOutward(solid: RawSolid): void {
 // --- round corners ----------------------------------------------------------
 
 /**
- * Rolling-ball volume at a vertex where exactly three convex faces meet.
- * `cut = box(q, 4r) − sphere(q, r)` restricted to the octant at the corner:
+ * Rolling-ball volume at a vertex where exactly three faces meet.
+ * `corner = box(q, 4r) − sphere(q, r)` restricted to the octant at the corner:
  * the box spans from the sphere centre q to the vertex in each face normal
  * direction, which is exactly the region where the sphere is the nearest part
- * of the eroded solid. Outside that octant the edge sweeps already cover it.
+ * of the eroded (convex) or grown (concave) solid. Outside that octant the
+ * edge sweeps already cover it.
+ *
+ * For a convex corner q is r inside each face and the corner solid is
+ * subtracted. For a concave corner q is r outside each face (in the air
+ * wedge) and the same `box − sphere` corner solid is *added*; that is the
+ * rolling-ball fillet of a cavity corner.
  *
  * `cornerSegments` is the 8..12 value from PLAN §4.4.5; the sphere is built
  * with twice that many circular segments, matching the M0 spike. Manifold
@@ -304,15 +321,19 @@ export function buildCornerCut(
   cornerSegments: number,
   inset: number,
   extend = 1e-3,
+  concave = false,
 ): Manifold | null {
   if (normals.length !== 3) return null;
-  const delta = solve3(normals, [-radius, -radius, -radius]);
+  // n·delta = -r puts q inside a convex corner, +r outside a concave one.
+  const offset = concave ? radius : -radius;
+  const delta = solve3(normals, [offset, offset, offset]);
   if (!delta) return null;
   const q = add(v, delta);
 
-  // the three outer planes sit `extend` outside the solid so the cut's faces
-  // are not coplanar with the base faces
-  const dV = normals.map((n) => dot(n, v) + extend);
+  // The vertex-side planes sit `extend` outside a convex solid and `extend`
+  // inside a concave one, so the boolean never sees coplanar side faces.
+  const vertexOffset = concave ? -extend : extend;
+  const dV = normals.map((n) => dot(n, v) + vertexOffset);
   const dQ = normals.map((n) => dot(n, q));
   const pts: Vec3[] = [];
   for (let m = 0; m < 8; m++) {

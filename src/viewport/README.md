@@ -96,7 +96,7 @@ class SceneController {
 directly. It never mutates or copies `positions` / `indices`. `bounds` is
 optional (the store's `meta.bbox` saves one pass over the vertices).
 
-The optional `bevelFaces` mask (one byte per triangle, 1 = cut-solid face) adds
+The optional `bevelFaces` mask (one byte per triangle, 1 = bevel-solid face) adds
 a second mesh that reuses the same vertex attributes and draws only those
 triangles with the `--bevel-face` material. Nothing is duplicated except the
 index list, so the tint costs one extra draw call, not another copy of the mesh.

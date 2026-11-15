@@ -37,10 +37,12 @@ inside the worker and cannot be preempted. Preview and export both call the
 same `bevelMesh` with the app's parameters; export additionally serialises the
 result to binary STL.
 
-`bevelMesh` builds a cut solid per edge, unions the parts with a Manifold WASM
-boolean, validates the result and returns the closest mesh with a
-`bevel.nonManifold` warning when the watertight check fails. The Inspector
-blocks export while that warning is present.
+`bevelMesh` builds one sweep per selected edge — subtractive for convex edges,
+additive for concave fillets — joins chains with mitred overlaps and
+rolling-ball corner solids, unions the parts with a Manifold WASM boolean,
+validates the result and returns the closest mesh with a `bevel.nonManifold`
+warning when the watertight check fails. The Inspector blocks export while that
+warning is present.
 
 ## Invariants
 

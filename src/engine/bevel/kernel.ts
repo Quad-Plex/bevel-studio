@@ -9,10 +9,12 @@
  * Pipeline (PLAN §4.4):
  *   1. rebuild the canonical edge table once per MeshData (cached by identity)
  *   2. clamp each selected edge independently (never a global minimum)
- *   3. build one closed cut solid per edge, with the radius tapered to zero at
- *      terminations, plus sphere cuts at fully-selected 3-face convex corners
- *   4. `Manifold.union(cuts)` once, then `base.subtract(union)` once
- *   5. drop zero-volume boolean fragments, weld at 1e-4 mm and rebuild the
+ *   3. build one closed sweep per edge, with the radius tapered to zero only
+ *      at genuine terminations, plus rolling-ball corner solids at fully
+ *      selected 3-face vertices
+ *   4. convex sweeps are unioned and subtracted; concave sweeps (additive
+ *      fillets) are unioned with the base, then the convex cut is subtracted
+ *   5. drop zero-volume boolean fragments, weld at 1e-3 mm and rebuild the
  *      Manifold; on failure retry once with a 1e-4 mm arc inset
  *
  * Units are millimetres. Nothing is rescaled or recentred.
@@ -23,11 +25,22 @@
  *     shortest incident edge) when the analyzer has not supplied one. There is
  *     deliberately no global minimum over the selection.
  *   - an edge clamped below 1 % of the requested width is skipped and reported,
- *     not silently beveled at a useless size; an edge shorter than 4× its
- *     applied width is skipped too.
- *   - at a termination the radius fades to zero over min(r, 0.25 × L). At a
- *     fully selected convex 3-face corner it stays full and a sphere cut
- *     finishes the corner; unsupported corners taper instead.
+ *     not silently beveled at a useless size.
+ *   - selected edges form chains. At a vertex with two or more selected sharp
+ *     edges the sweep keeps its full radius and is extended past the vertex by
+ *     the miter length r·tan(turn/2), so neighbouring sweeps overlap instead of
+ *     tapering into a gap. Only a genuine termination (exactly one selected
+ *     sharp edge at the vertex) fades out, over min(r, 0.25 × L).
+ *   - a fully selected 3-face vertex uses a rolling-ball corner solid (cut for
+ *     convex, added for concave) and needs no miter extension.
+ *   - a knife edge whose adjacent normals fold far past 90° has a fillet
+ *     footprint r·tan(half) several times r along both faces. Carried at full
+ *     radius into a cap face, that fillet ends in a vertical side wall meeting
+ *     the cap at 90°. Such an edge fades over its own footprint at both caps.
+ *   - edges shorter than 0.05 mm are not swept (they would only make boolean
+ *     slivers); the neighbouring sweeps extend across them. A short edge with
+ *     a real termination is beveled at min(r, 0.45 × L) instead of being
+ *     dropped; chain-interior edges keep their full width.
  */
 import Module from 'manifold-3d';
 import type { ErrorStatus, Manifold, ManifoldToplevel } from 'manifold-3d';
@@ -43,7 +56,7 @@ import {
 } from './topology';
 
 const KERNEL_NAME = 'manifold-3d 3.5.5';
-const WELD_TOLERANCE = 1e-4;
+const WELD_TOLERANCE = 1e-3;
 const RETRY_INSET = 1e-4;
 /**
  * faceID stamped on every base triangle. Manifold keeps faceIDs through
@@ -84,9 +97,10 @@ function requireWasm(): ManifoldToplevel {
 /** Diagnostic switches; production uses the defaults. */
 export interface BevelKernelOptions {
   /**
-   * 'auto' (default) fades the radius to zero where a neighbouring edge is not
-   * beveled. 'none' keeps the full radius to the vertex; used by the kernel
-   * tests to pin the analytic full-length volume.
+   * 'auto' (default) fades the radius to zero at a genuine termination, where
+   * no other selected sharp edge meets the vertex. 'none' keeps the full
+   * radius to every endpoint; used by the kernel tests to pin the analytic
+   * full-length volume.
    */
   taper?: 'auto' | 'none';
   /** Set false to disable corner spheres (diagnostics only). */
@@ -233,7 +247,7 @@ function manifoldToMeshWithFaces(manifold: Manifold): {
   }
 }
 
-/** 1 for cut-solid triangles, 0 for untouched base surface. */
+/** 1 for bevel-solid triangles, 0 for untouched base surface. */
 function bevelMask(faceIds: Uint32Array | null, triangles: number): Uint8Array | undefined {
   if (!faceIds || faceIds.length !== triangles) return undefined;
   const mask = new Uint8Array(triangles);
@@ -371,8 +385,14 @@ interface EdgeJob {
   n2: Vec3;
   length: number;
   radius: number;
+  /** true = additive fillet of a reflex edge */
+  concave: boolean;
+  /** linear fade length at A / B, mm */
   taperA: number;
   taperB: number;
+  /** sweep overshoot past A / B to join a chain, mm */
+  extendA: number;
+  extendB: number;
 }
 
 interface CornerCandidate {
@@ -380,7 +400,11 @@ interface CornerCandidate {
   position: Vec3;
   normals: Vec3[];
   radius: number;
+  concave: boolean;
 }
+
+/** Below this length a sweep is all boolean sliver and no visible bevel. */
+const MICRO_EDGE = 0.05;
 
 interface CleanupResult {
   manifold: Manifold;
@@ -403,7 +427,7 @@ interface Attempt extends CleanupResult {
   error?: string;
 }
 
-/** Drop zero-volume fragments, weld at 1e-4 and rebuild the Manifold. */
+/** Drop zero-volume fragments, weld at 1e-3 and rebuild the Manifold. */
 function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel): CleanupResult {
   const parts = raw.decompose();
   const eps = Math.max(1e-9, Math.abs(baseVolume) * 1e-9);
@@ -418,7 +442,8 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
   else out = instance.Manifold.union(keep);
 
   // CSG leaves the exact input surface untouched; the weld below merges the
-  // 1e-4 slivers. A global `simplify()` was tried and removed: it decimates
+  // sub-micron T-junction vertices. A global `simplify()` was tried and
+  // removed: it decimates
   // flat regions (1.08 M → 4 200 triangles) and is unit-dependent.
   const source = manifoldToMeshWithFaces(out);
   const welded = weldMesh(source.mesh.positions, source.mesh.indices, WELD_TOLERANCE);
@@ -520,11 +545,21 @@ export function bevelMesh(
   }
 
   // --- selection, per-edge clamp -------------------------------------------
-  const jobs: EdgeJob[] = [];
-  let concave = 0;
+  interface SelectedEdge {
+    index: number;
+    edge: number;
+    aVertex: number;
+    bVertex: number;
+    length: number;
+    radius: number;
+    concave: boolean;
+  }
+
+  const selected: SelectedEdge[] = [];
+  const widthByEdge = new Float32Array(topo.edgeCount);
   let unusable = 0;
   let narrow = 0;
-  let short = 0;
+  let micro = 0;
 
   for (let i = 0; i < selectionCount; i++) {
     const e = edgeIds[i];
@@ -533,18 +568,14 @@ export function bevelMesh(
       continue;
     }
     const kind = topo.convex[e];
-    if (kind === 0) {
-      concave++;
-      continue;
-    }
-    if (kind !== 1) {
+    if (kind !== 0 && kind !== 1) {
       unusable++;
       continue;
     }
 
     const length = topo.length[e];
     if (!(length > 1e-9)) {
-      short++;
+      micro++;
       continue;
     }
 
@@ -557,36 +588,134 @@ export function bevelMesh(
 
     // A bevel narrower than 1 % of the request is visually nothing and makes
     // fragile slivers; skip it and tell the UI instead of silently shrinking.
+    // It stays in the selection below so neighbouring sweeps still join it.
+    selected.push({
+      index: i,
+      edge: e,
+      aVertex: topo.v[e * 2],
+      bVertex: topo.v[e * 2 + 1],
+      length,
+      radius,
+      concave: kind === 0,
+    });
+  }
+
+  // Selected edges incident to a vertex. This is the chain graph: it includes
+  // edges too short or too narrow to sweep, so their neighbours never mistake
+  // a collapsed chain link for a real termination. See the module comment.
+  const incident = new Map<number, { edge: number; other: number; concave: boolean }[]>();
+  const addIncident = (vertex: number, edge: number, other: number, concave: boolean) => {
+    const entry = { edge, other, concave };
+    const list = incident.get(vertex);
+    if (list) list.push(entry);
+    else incident.set(vertex, [entry]);
+  };
+  for (const item of selected) {
+    addIncident(item.aVertex, item.edge, item.bVertex, item.concave);
+    addIncident(item.bVertex, item.edge, item.aVertex, item.concave);
+  }
+
+  const position = mesh.positions;
+  const direction = (vertex: number, other: number): Vec3 | null => {
+    const dx = position[other * 3] - position[vertex * 3];
+    const dy = position[other * 3 + 1] - position[vertex * 3 + 1];
+    const dz = position[other * 3 + 2] - position[vertex * 3 + 2];
+    const length = Math.hypot(dx, dy, dz);
+    if (length < 1e-9) return null;
+    return [dx / length, dy / length, dz / length];
+  };
+
+  /**
+   * How far a sweep must run past a chain joint to cover the wedge the next
+   * sweep leaves open. For a turn of θ the surface bands of the two sweeps
+   * meet at the miter line, r·tan(θ/2) past the vertex; the 3-D corner is
+   * covered by the same overshoot. `turn` is π minus the angle between the two
+   * outgoing edge directions (180° = straight continuation).
+   *
+   * Near-parallel outgoing edges (a collapsed notch/tessellation edge) are
+   * ignored: they lie inside this sweep's own band and would read as a 180°
+   * fold-back.
+   */
+  const jointExtension = (job: EdgeJob, vertex: number, other: number): number => {
+    const list = incident.get(vertex);
+    if (!list) return 0;
+    const d = direction(vertex, other);
+    if (!d) return 0;
+    let best = 0;
+    for (const item of list) {
+      if (item.edge === job.edge) continue;
+      const w = direction(vertex, item.other);
+      if (!w) continue;
+      const cos = Math.max(-1, Math.min(1, d[0] * w[0] + d[1] * w[1] + d[2] * w[2]));
+      const phi = Math.acos(cos);
+      if (phi < Math.PI / 18) continue; // < 10°: same ray, no joint wedge
+      const turn = Math.PI - phi;
+      best = Math.max(best, job.radius * Math.tan(Math.min(turn, (2 * Math.PI) / 3) / 2));
+    }
+    if (!(best > 0)) return 0;
+    // Even a straight joint gets a small overlap so the two end caps are not
+    // exactly coincident coplanar faces in the boolean.
+    best = Math.max(best, job.radius * 0.1);
+    return Math.min(best, job.radius * 2, job.length * 0.45);
+  };
+
+  const jobs: EdgeJob[] = [];
+  for (const item of selected) {
+    if (item.length < MICRO_EDGE) {
+      micro++;
+      continue;
+    }
+    const listA = incident.get(item.aVertex);
+    const listB = incident.get(item.bVertex);
+    const jointA = (listA?.length ?? 0) >= 2;
+    const jointB = (listB?.length ?? 0) >= 2;
+    let radius = item.radius;
+    // A short edge with a real termination cannot fit the requested radius
+    // plus its taper. Bevel it at the largest width that fits instead of
+    // dropping it. Edges inside a chain keep their full width because the
+    // neighbouring sweeps cover both joints.
+    if ((!jointA || !jointB) && item.length < 4 * radius) {
+      radius = Math.min(radius, 0.45 * item.length);
+    }
     if (!(radius > 0) || radius < requested * 0.01) {
       narrow++;
       continue;
     }
-    if (length < 4 * radius) {
-      short++;
-      continue;
-    }
 
-    appliedWidth[i] = radius;
+    appliedWidth[item.index] = radius;
+    widthByEdge[item.edge] = radius;
     jobs.push({
-      edge: e,
-      aVertex: topo.v[e * 2],
-      bVertex: topo.v[e * 2 + 1],
-      a: [mesh.positions[topo.v[e * 2] * 3], mesh.positions[topo.v[e * 2] * 3 + 1], mesh.positions[topo.v[e * 2] * 3 + 2]],
-      b: [mesh.positions[topo.v[e * 2 + 1] * 3], mesh.positions[topo.v[e * 2 + 1] * 3 + 1], mesh.positions[topo.v[e * 2 + 1] * 3 + 2]],
-      n1: [topo.normals[e * 6], topo.normals[e * 6 + 1], topo.normals[e * 6 + 2]],
-      n2: [topo.normals[e * 6 + 3], topo.normals[e * 6 + 4], topo.normals[e * 6 + 5]],
-      length,
+      edge: item.edge,
+      aVertex: item.aVertex,
+      bVertex: item.bVertex,
+      a: [
+        position[item.aVertex * 3],
+        position[item.aVertex * 3 + 1],
+        position[item.aVertex * 3 + 2],
+      ],
+      b: [
+        position[item.bVertex * 3],
+        position[item.bVertex * 3 + 1],
+        position[item.bVertex * 3 + 2],
+      ],
+      n1: [topo.normals[item.edge * 6], topo.normals[item.edge * 6 + 1], topo.normals[item.edge * 6 + 2]],
+      n2: [topo.normals[item.edge * 6 + 3], topo.normals[item.edge * 6 + 4], topo.normals[item.edge * 6 + 5]],
+      length: item.length,
       radius,
+      concave: item.concave,
       taperA: 0,
       taperB: 0,
+      extendA: 0,
+      extendB: 0,
     });
   }
 
-  if (concave > 0) {
+  const concaveJobs = jobs.filter((job) => job.concave).length;
+  if (concaveJobs > 0) {
     warnings.push({
-      code: 'bevel.concave',
-      severity: 'warning',
-      message: `Skipped ${concave} concave edge${concave === 1 ? '' : 's'}; this version bevels outside edges only.`,
+      code: 'bevel.fillet',
+      severity: 'info',
+      message: `Added fillet material on ${concaveJobs} concave edge${concaveJobs === 1 ? '' : 's'}.`,
     });
   }
   if (unusable > 0) {
@@ -603,13 +732,14 @@ export function bevelMesh(
       message: `Skipped ${narrow} edge${narrow === 1 ? '' : 's'} with no room at the requested width.`,
     });
   }
-  if (short > 0) {
+  if (micro > 0) {
     warnings.push({
       code: 'bevel.short',
       severity: 'info',
-      message: `Skipped ${short} edge${short === 1 ? '' : 's'} shorter than 4× the bevel width.`,
+      message: `Collapsed ${micro} edge${micro === 1 ? '' : 's'} shorter than ${formatMm(MICRO_EDGE)} mm; neighbouring bevels extend across.`,
     });
   }
+
 
   let clampedEdges = 0;
   let narrowestClamp = Infinity;
@@ -632,49 +762,24 @@ export function bevelMesh(
     return emptyResult(mesh, cached, appliedWidth, warnings, started);
   }
 
-  // --- corners and terminations -------------------------------------------
-  const widthByEdge = new Float32Array(topo.edgeCount);
-  for (const job of jobs) widthByEdge[job.edge] = job.radius;
-
-  // Selected edges incident to a vertex, so a bevel can tell a real termination
-  // from a chain that merely bends (a rim split into many short edges).
-  const incident = new Map<number, { edge: number; other: number }[]>();
-  for (const job of jobs) {
-    const a = incident.get(job.aVertex);
-    if (a) a.push({ edge: job.edge, other: job.bVertex });
-    else incident.set(job.aVertex, [{ edge: job.edge, other: job.bVertex }]);
-    const b = incident.get(job.bVertex);
-    if (b) b.push({ edge: job.edge, other: job.aVertex });
-    else incident.set(job.bVertex, [{ edge: job.edge, other: job.aVertex }]);
+  let mixedCorners = 0;
+  for (const list of incident.values()) {
+    if (list.length < 2) continue;
+    let hasConvex = false;
+    let hasConcave = false;
+    for (const item of list) {
+      if (item.concave) hasConcave = true;
+      else hasConvex = true;
+    }
+    if (hasConvex && hasConcave) mixedCorners++;
   }
 
-  const position = mesh.positions;
-  const continues = (vertex: number, other: number, edge: number): boolean => {
-    const list = incident.get(vertex);
-    if (!list || list.length < 2) return false;
-    const vx = position[other * 3] - position[vertex * 3];
-    const vy = position[other * 3 + 1] - position[vertex * 3 + 1];
-    const vz = position[other * 3 + 2] - position[vertex * 3 + 2];
-    const vLength = Math.hypot(vx, vy, vz);
-    if (vLength < 1e-9) return false;
-
-    for (const item of list) {
-      if (item.edge === edge) continue;
-      const wx = position[item.other * 3] - position[vertex * 3];
-      const wy = position[item.other * 3 + 1] - position[vertex * 3 + 1];
-      const wz = position[item.other * 3 + 2] - position[vertex * 3 + 2];
-      const wLength = Math.hypot(wx, wy, wz);
-      if (wLength < 1e-9) continue;
-      const dot = (vx * wx + vy * wy + vz * wz) / (vLength * wLength);
-      // Outgoing directions at a straight chain point opposite ways, so a
-      // nearly collinear continuation has a dot close to -1.
-      if (dot < -0.5) return true;
-    }
-    return false;
-  };
-
-  const vertexCount = mesh.positions.length / 3;
+  // --- corners -------------------------------------------------------------
+  const vertexCount = position.length / 3;
   const cornerOk = new Uint8Array(vertexCount);
+  /** 1 when the three face normals are mutually orthogonal; `box − sphere` is
+   * exact there. Skew corners also get a miter overlap from their sweeps. */
+  const cornerOrthogonal = new Uint8Array(vertexCount);
   const cornerCandidates: CornerCandidate[] = [];
   const probeSolids: (Manifold | null)[] = [];
   let unsupportedCorners = 0;
@@ -687,6 +792,7 @@ export function bevelMesh(
       let sharp = 0;
       let allBeveled = true;
       let allConvex = true;
+      let allConcave = true;
       let minRadius = Infinity;
       const normals: Vec3[] = [];
 
@@ -696,31 +802,38 @@ export function bevelMesh(
         sharp++;
         if (!(widthByEdge[e] > 0)) allBeveled = false;
         if (topo.convex[e] !== 1) allConvex = false;
+        if (topo.convex[e] !== 0) allConcave = false;
         if (widthByEdge[e] > 0 && widthByEdge[e] < minRadius) minRadius = widthByEdge[e];
         addUniqueNormal(normals, topo.normals, e * 6);
         addUniqueNormal(normals, topo.normals, e * 6 + 3);
       }
 
-      if (sharp !== 3 || !allBeveled || !allConvex) continue;
-      if (normals.length !== 3 || !Number.isFinite(minRadius)) {
+      if (sharp !== 3 || !allBeveled) continue;
+      if ((!allConvex && !allConcave) || normals.length !== 3 || !Number.isFinite(minRadius)) {
         unsupportedCorners++;
         continue;
       }
 
       const candidate: CornerCandidate = {
         vertex: v,
-        position: [
-          mesh.positions[v * 3],
-          mesh.positions[v * 3 + 1],
-          mesh.positions[v * 3 + 2],
-        ],
+        position: [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]],
         normals,
         radius: minRadius,
+        concave: allConcave,
       };
 
       let solid: Manifold | null = null;
       try {
-        solid = buildCornerCut(instance, candidate.position, normals, minRadius, cornerSegments, 0);
+        solid = buildCornerCut(
+          instance,
+          candidate.position,
+          normals,
+          minRadius,
+          cornerSegments,
+          0,
+          1e-3,
+          candidate.concave,
+        );
       } catch {
         solid = null;
       }
@@ -729,43 +842,73 @@ export function bevelMesh(
         continue;
       }
       cornerOk[v] = 1;
+      const [na, nb, nc] = normals;
+      if (
+        Math.abs(na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]) < 1e-3 &&
+        Math.abs(na[0] * nc[0] + na[1] * nc[1] + na[2] * nc[2]) < 1e-3 &&
+        Math.abs(nb[0] * nc[0] + nb[1] * nc[1] + nb[2] * nc[2]) < 1e-3
+      ) {
+        cornerOrthogonal[v] = 1;
+      }
       cornerCandidates.push(candidate);
       probeSolids.push(solid);
     }
   }
 
   for (const job of jobs) {
-    const continuesA = continues(job.aVertex, job.bVertex, job.edge);
-    const continuesB = continues(job.bVertex, job.aVertex, job.edge);
+    const listA = incident.get(job.aVertex);
+    const listB = incident.get(job.bVertex);
+    const jointA = (listA?.length ?? 0) >= 2;
+    const jointB = (listB?.length ?? 0) >= 2;
 
-    job.taperA = taperMode === 'none' || cornerOk[job.aVertex] || continuesA
-      ? 0
-      : Math.min(job.radius, 0.25 * job.length);
-    job.taperB = taperMode === 'none' || cornerOk[job.bVertex] || continuesB
-      ? 0
-      : Math.min(job.radius, 0.25 * job.length);
+    // A knife edge (faces folded far past 90°) has a fillet footprint
+    // r·tan(halfAngle) several times r along both faces. If that wide fillet is
+    // carried at full radius into a cap face it leaves a vertical side wall
+    // meeting the cap at 90° — the hook notch's step. Fade such an edge out
+    // over its own footprint at both caps instead.
+    const nd = Math.max(
+      -1,
+      Math.min(1, job.n1[0] * job.n2[0] + job.n1[1] * job.n2[1] + job.n1[2] * job.n2[2]),
+    );
+    const footprint = job.radius * Math.tan(Math.acos(nd) / 2);
+    const capTaper = footprint > job.radius * 2 ? Math.min(footprint, 0.45 * job.length) : 0;
+    if (taperMode !== 'none' && capTaper > 0) {
+      job.taperA = capTaper;
+      job.taperB = capTaper;
+    } else {
+      job.taperA = taperMode === 'none' || cornerOk[job.aVertex] || jointA
+        ? 0
+        : Math.min(job.radius, 0.25 * job.length);
+      job.taperB = taperMode === 'none' || cornerOk[job.bVertex] || jointB
+        ? 0
+        : Math.min(job.radius, 0.25 * job.length);
+    }
 
-    // At a bend, two cut solids that stop exactly on the vertex plane leave a
-    // thin V of original wall between them. Extend each one past the joint so
-    // the union covers it; a real termination keeps its flat cap.
-    if (continuesA || continuesB) {
-      const dx = job.b[0] - job.a[0];
-      const dy = job.b[1] - job.a[1];
-      const dz = job.b[2] - job.a[2];
-      const length = Math.hypot(dx, dy, dz);
-      if (length > 1e-9) {
-        const extension = Math.min(job.radius * 0.75, length * 0.4) / length;
-        if (continuesA) {
-          job.a[0] -= dx * extension;
-          job.a[1] -= dy * extension;
-          job.a[2] -= dz * extension;
-        }
-        if (continuesB) {
-          job.b[0] += dx * extension;
-          job.b[1] += dy * extension;
-          job.b[2] += dz * extension;
-        }
-      }
+    // A joint keeps the full radius and overshoots the vertex, so the next
+    // sweep's band meets it. An orthogonal 3-face corner is already closed by
+    // its `box − sphere` solid; a skew one also gets this miter overlap.
+    const cornerA = cornerOk[job.aVertex] === 1 && cornerOrthogonal[job.aVertex] === 1;
+    const cornerB = cornerOk[job.bVertex] === 1 && cornerOrthogonal[job.bVertex] === 1;
+    if (jointA && job.taperA === 0 && !cornerA) {
+      job.extendA = jointExtension(job, job.aVertex, job.bVertex);
+    }
+    if (jointB && job.taperB === 0 && !cornerB) {
+      job.extendB = jointExtension(job, job.bVertex, job.aVertex);
+    }
+
+    const dx = job.b[0] - job.a[0];
+    const dy = job.b[1] - job.a[1];
+    const dz = job.b[2] - job.a[2];
+    const length = Math.hypot(dx, dy, dz);
+    if (length > 1e-9) {
+      const scaleA = job.extendA / length;
+      const scaleB = job.extendB / length;
+      job.a[0] -= dx * scaleA;
+      job.a[1] -= dy * scaleA;
+      job.a[2] -= dz * scaleA;
+      job.b[0] += dx * scaleB;
+      job.b[1] += dy * scaleB;
+      job.b[2] += dz * scaleB;
     }
   }
 
@@ -773,14 +916,22 @@ export function bevelMesh(
     warnings.push({
       code: 'bevel.corner',
       severity: 'info',
-      message: `${unsupportedCorners} corner${unsupportedCorners === 1 ? '' : 's'} left sharp: the faces do not meet as a simple 3-face corner.`,
+      message: `${unsupportedCorners} corner${unsupportedCorners === 1 ? '' : 's'} ${unsupportedCorners === 1 ? 'was' : 'were'} joined by mitred overlap instead of a spherical patch.`,
+    });
+  }
+  if (mixedCorners > 0) {
+    warnings.push({
+      code: 'bevel.mixedCorner',
+      severity: 'info',
+      message: `${mixedCorners} corner${mixedCorners === 1 ? '' : 's'} mix convex and concave bevels; they are joined by overlap.`,
     });
   }
 
   // --- one boolean attempt -------------------------------------------------
   const attempt = (inset: number): Attempt => {
     const buildStart = now();
-    const solids: Manifold[] = [];
+    const cutSolids: Manifold[] = [];
+    const fillSolids: Manifold[] = [];
     let failedSolids = 0;
     let failedCorners = 0;
 
@@ -793,14 +944,20 @@ export function bevelMesh(
         taperA: job.taperA,
         taperB: job.taperB,
         taperStations: 1,
-        extend: 0,
+        // A 1e-3 mm overshoot keeps the sweep's side walls from being exactly
+        // coplanar with the base faces in the boolean. It lies outside a
+        // convex solid and inside a concave one, so neither changes volume.
+        // With 0 the outside-only hook selection self-intersects; with this
+        // offset it stays clean.
+        extend: 1e-3,
+        concave: job.concave,
       });
       if (!raw) {
         failedSolids++;
         continue;
       }
       try {
-        solids.push(meshToManifold(raw));
+        (job.concave ? fillSolids : cutSolids).push(meshToManifold(raw));
       } catch {
         failedSolids++;
       }
@@ -820,12 +977,14 @@ export function bevelMesh(
             candidate.radius,
             clampInt(options.cornerSegments ?? segments * 2, 8, 12),
             inset,
+            1e-3,
+            candidate.concave,
           );
         } catch {
           solid = null;
         }
       }
-      if (solid) solids.push(solid);
+      if (solid) (candidate.concave ? fillSolids : cutSolids).push(solid);
       else failedCorners++;
     }
 
@@ -834,12 +993,18 @@ export function bevelMesh(
 
     let raw: Manifold;
     try {
-      if (solids.length === 0) {
-        raw = base;
-      } else {
-        const union = solids.length === 1 ? solids[0] : instance.Manifold.union(solids);
-        raw = base.subtract(union);
+      // Additive fillets first, then the convex cuts: the two sets touch at
+      // mixed corners, and this order keeps each sweep's own result intact.
+      let working = base;
+      if (fillSolids.length > 0) {
+        const fill = fillSolids.length === 1 ? fillSolids[0] : instance.Manifold.union(fillSolids);
+        working = working.add(fill);
       }
+      if (cutSolids.length > 0) {
+        const cut = cutSolids.length === 1 ? cutSolids[0] : instance.Manifold.union(cutSolids);
+        working = working.subtract(cut);
+      }
+      raw = working;
       void raw.numTri(); // force the deferred CSG tree inside the timed region
     } catch (error) {
       return {
@@ -986,13 +1151,14 @@ export function bevelMesh(
   }
 
   const removed = volumeBefore - chosen.volume;
-  if (removed < -1e-6) {
+  const hasAdditive = concaveJobs > 0;
+  if (removed < -1e-6 && !hasAdditive) {
     warnings.push({
       code: 'bevel.volumeGain',
       severity: 'error',
       message: 'The bevel added material instead of removing it; check the mesh orientation.',
     });
-  } else if (removed <= 1e-6) {
+  } else if (removed <= 1e-6 && !hasAdditive) {
     warnings.push({
       code: 'bevel.volumeUnchanged',
       severity: 'warning',

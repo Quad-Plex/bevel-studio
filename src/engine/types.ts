@@ -132,9 +132,10 @@ export interface BevelResult {
   /** Triangle pairs passing through each other; 0 is the only safe value. */
   selfIntersections?: number;
   /**
-   * One byte per result triangle: 1 when the triangle was created by a cut
-   * solid (the bevel band), 0 when it is untouched base surface. Absent when
-   * the kernel could not attribute faces, in which case nothing is tinted.
+   * One byte per result triangle: 1 when the triangle was created by a bevel
+   * solid — a subtractive cut or an additive concave fillet (the bevel band) —
+   * 0 when it is untouched base surface. Absent when the kernel could not
+   * attribute faces, in which case nothing is tinted.
    */
   bevelFaces?: Uint8Array;
 }
