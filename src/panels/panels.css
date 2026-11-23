@@ -258,3 +258,13 @@
     display: none;
   }
 }
+
+.inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inspector-actions > * {
+  flex: 1 1 auto;
+}

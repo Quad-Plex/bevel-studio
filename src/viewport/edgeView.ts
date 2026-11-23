@@ -25,6 +25,9 @@ export const FAT_EDGE_LIMIT = 30_000;
 const EDGE_COLOR = 0x7f8f97;
 const EDGE_OPACITY = 0.22;
 const FAT_WIDTH = 2.2;
+const HOVER_WIDTH = 4;
+
+export type HoverMode = 'add' | 'remove';
 
 /**
  * Edge overlay.
@@ -58,6 +61,10 @@ export class EdgeView {
   private fatData: Float32Array | null = null;
   private fatCore: LineSegments2 | null = null;
 
+  /** Brush preview: unselected edges (a click adds them) and selected ones (removable). */
+  private readonly hover: Record<HoverMode, HoverLayer>;
+  private hoverKey = '';
+
   private fallbackGeometry: BufferGeometry | null = null;
   private fallbackData: Float32Array | null = null;
   private fallbackCapacity = 0;
@@ -66,7 +73,12 @@ export class EdgeView {
   constructor(
     private readonly invalidate: () => void,
     selectionColor: string,
+    hoverColors: Record<HoverMode, string> = { add: '#7de2c3', remove: '#ff6b6b' },
   ) {
+    this.hover = {
+      add: new HoverLayer(this.group, hoverColors.add, 'edges-hover-add'),
+      remove: new HoverLayer(this.group, hoverColors.remove, 'edges-hover-remove'),
+    };
     this.group.name = 'edge-overlay';
 
     this.baseMaterial = new LineBasicMaterial({
@@ -109,12 +121,30 @@ export class EdgeView {
   /** The material resolution is in CSS pixels; call this whenever the canvas resizes. */
   setResolution(width: number, height: number): void {
     this.fatMaterial.resolution.set(width, height);
+    this.hover.add.setResolution(width, height);
+    this.hover.remove.setResolution(width, height);
   }
 
   /**
-   * `setEdges(table, null)` clears everything. Passing the same table again is
-   * cheap: only the selection overlay is refreshed.
+   * Edges under the selection brush, drawn on top: `add` are not selected yet
+   * (a left click adds them), `remove` are selected (a right click removes
+   * them). The group matching the pending action `mode` is drawn at full
+   * strength, the other one dimmed. `null` hides both.
    */
+  setHover(groups: { add: readonly number[]; remove: readonly number[] } | null, mode: HoverMode = 'add'): void {
+    const table = this.table;
+    const key =
+      groups && (groups.add.length > 0 || groups.remove.length > 0)
+        ? `${mode}|${groups.add.join(',')}|${groups.remove.join(',')}`
+        : '';
+    if (key === this.hoverKey) return;
+    this.hoverKey = key;
+    for (const layer of ['add', 'remove'] as const) {
+      this.hover[layer].show(table, groups ? groups[layer] : [], layer === mode);
+    }
+    this.invalidate();
+  }
+
   /** World units per screen pixel at the model, used to overlap fat segments. */
   setPixelScale(worldPerPixel: number): void {
     if (Number.isFinite(worldPerPixel) && worldPerPixel > 0) this.worldPerPixel = worldPerPixel;
@@ -148,6 +178,8 @@ export class EdgeView {
     this.baseMaterial.dispose();
     this.fatMaterial.dispose();
     this.fallbackMaterial.dispose();
+    this.hover.add.dispose();
+    this.hover.remove.dispose();
     this.group.removeFromParent();
   }
 
@@ -374,9 +406,16 @@ export class EdgeView {
     this.fatCore = null;
 
     this.releaseFallback();
+    this.releaseHover();
     this.table = null;
     this.selection = null;
     this.edgeCount = 0;
+  }
+
+  private releaseHover(): void {
+    this.hover.add.release();
+    this.hover.remove.release();
+    this.hoverKey = '';
   }
 
   private releaseFallback(): void {
@@ -386,5 +425,91 @@ export class EdgeView {
     this.fallbackData = null;
     this.fallbackCapacity = 0;
     this.fallbackLines = null;
+  }
+}
+
+/** One colour of the brush preview: screen-space fat lines on top of the model. */
+class HoverLayer {
+  private readonly material: LineMaterial;
+  private lines: LineSegments2 | null = null;
+  private geometry: LineSegmentsGeometry | null = null;
+  private buffer: InstancedInterleavedBuffer | null = null;
+  private data: Float32Array | null = null;
+
+  constructor(
+    private readonly group: Group,
+    color: string,
+    private readonly name: string,
+  ) {
+    // Drawn without depth test: the brush already rejected hidden edges, and
+    // a source edge may sit inside the beveled preview surface.
+    this.material = new LineMaterial({
+      color,
+      linewidth: HOVER_WIDTH,
+      worldUnits: false,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      depthTest: false,
+      toneMapped: false,
+      alphaToCoverage: true,
+    });
+  }
+
+  setResolution(width: number, height: number): void {
+    this.material.resolution.set(width, height);
+  }
+
+  show(table: EdgeTable | null, ids: readonly number[], active: boolean): void {
+    if (!table || ids.length === 0) {
+      if (this.lines) this.lines.visible = false;
+      return;
+    }
+    if (!this.data || this.data.length < ids.length * 6) {
+      this.release();
+      const capacity = Math.max(64, ids.length * 2);
+      const data = new Float32Array(capacity * 6);
+      const buffer = new InstancedInterleavedBuffer(data, 6, 1);
+      buffer.setUsage(DynamicDrawUsage);
+      const geometry = new LineSegmentsGeometry();
+      geometry.setAttribute('instanceStart', new InterleavedBufferAttribute(buffer, 3, 0));
+      geometry.setAttribute('instanceEnd', new InterleavedBufferAttribute(buffer, 3, 3));
+      geometry.boundingSphere = new Sphere(new Vector3(), Infinity);
+      const lines = new LineSegments2(geometry, this.material);
+      lines.name = this.name;
+      lines.frustumCulled = false;
+      lines.renderOrder = 5;
+      this.group.add(lines);
+      this.data = data;
+      this.buffer = buffer;
+      this.geometry = geometry;
+      this.lines = lines;
+    }
+    let offset = 0;
+    for (const id of ids) {
+      this.data.set(table.position.subarray(id * 6, id * 6 + 6), offset);
+      offset += 6;
+    }
+    this.buffer!.clearUpdateRanges();
+    this.buffer!.addUpdateRange(0, offset);
+    this.buffer!.needsUpdate = true;
+    this.geometry!.instanceCount = ids.length;
+    this.material.linewidth = active ? HOVER_WIDTH : HOVER_WIDTH * 0.8;
+    this.material.opacity = active ? 0.95 : 0.85;
+    this.lines!.visible = true;
+  }
+
+  release(): void {
+    this.lines?.removeFromParent();
+    this.geometry?.dispose();
+    this.lines = null;
+    this.geometry = null;
+    this.buffer = null;
+    this.data = null;
+  }
+
+  dispose(): void {
+    this.release();
+    this.material.dispose();
   }
 }

@@ -18,14 +18,29 @@ desktop build wraps the same web app in a Tauri shell.
 
 - **Import** — binary or ASCII STL in millimetres, origin preserved. The repair
   pipeline welds at 1e-4 mm, fixes winding, drops duplicate and degenerate
-  faces, fills holes up to 64 edges and removes tiny disconnected shells.
+  faces, collapses or flips away sliver triangles (so a 1 µm step between two
+  caps is not a fake sharp edge), fills holes up to 64 edges and removes tiny
+  disconnected shells.
 - **Edges** — canonical edge table with dihedral angle, convexity, per-edge
   `maxWidth` and auto-detected candidates (convex, ≥ 20°).
-- **Selection** — click, right-click erase, drag to paint, `A` for all
-  candidates, `Ctrl+Z` / `Ctrl+Shift+Z` to undo and redo, `F` to refit.
-- **Bevel** — width, segments and profile with a real rolling-ball cut solid
-  and a Manifold WASM boolean, previewed live in a worker. The generated band
-  is tinted light purple so the fillet reads apart from the untouched surface.
+- **Selection brush** — a ring follows the cursor and highlights exactly the
+  edges a click would change (cyan to add, red to remove). Left click or drag
+  adds, right click or drag (or Alt) removes; `[` / `]` resize the ring. The
+  brush only picks real feature edges (outside, inside or both), never flat
+  triangulation diagonals, and skips edges hidden behind the part. `A` selects
+  all outside candidates; the inspector also selects all inside edges at once.
+  `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo, `F` refits.
+- **Bevel anywhere** — rolling-ball fillets on any selection of outside
+  (convex) and inside (concave) edges, previewed live in a worker:
+  - chains of edges are swept as one seamless solid, across tessellated
+    curves and small irregularities (sliver steps, near-flat creases);
+  - corners where every edge is beveled get a round rolling-ball blend, for
+    any number of faces, inside or outside;
+  - an inside fillet between two beveled rims makes the rim wrap around it;
+  - widths are limited only by real geometry (wall thickness, gaps), never by
+    triangle shapes, and a limit ramps along a chain instead of stepping.
+
+  The bevel band is tinted light purple so it reads apart from the surface.
 - **View** — toggle a triangle wireframe (`W`) over the shaded model, and force
   flat or creased shading from the inspector.
 - **Export** — binary STL in the input's units and origin, blocked when the
@@ -67,6 +82,7 @@ npm run tauri build   # NSIS installer in src-tauri/target/release/bundle/nsis/
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run acceptance` | Reference bevel gate, exits non-zero on drift |
 | `npm run bench` | 1.08 M-triangle import and bevel benchmark |
+| `blender -b --factory-startup --python tools/render-stl.py -- out.png "az,el,x,y,z,dist,lens" a.stl` | Headless render of STL files with wireframe, for visual checks |
 | `npm run tauri <cmd>` | Tauri CLI |
 
 ## Reference acceptance
@@ -79,13 +95,12 @@ in Blender:
 |---|---|---|---|
 | source | 140 | 12 871.80 | 47.88 × 62.15 × 35.00 |
 | hand-made reference | 654 | 12 788.47 | 47.88 × 61.87 × 35.00 |
-| **all convex edges** | 2 686 | **12 782.60** (−0.05 %) | **47.88 × 61.92 × 35.00** |
+| **all convex edges** | 2 146 | **12 828.20** (+0.31 %) | **47.88 × 61.96 × 35.00** |
 
-The tool lands within 0.05 % of the reference volume and 0.05 mm on the
-bounding box. It keeps roughly 4× more triangles because CSG retriangulates
-the trimmed faces; the shape, not the tessellation, is the acceptance
-criterion. The command asserts volume, bounding box, shell count and triangle
-window, and fails the build when the shape drifts.
+At a 0.5 mm width every edge keeps the full width; the tool lands within
+0.4 % of the hand-made reference volume and 0.1 mm on the bounding box. The
+command asserts volume, bounding box, shell count, a triangle window,
+watertightness and zero self-intersections, and fails when the shape drifts.
 
 ## Architecture
 
@@ -116,30 +131,30 @@ through the browser):
 |---|---|---|
 | parse + weld (2.16 M raw verts → 540 k) | 1.18 s | 7.57 s (whole import) |
 | repair + edge table (1.62 M edges) | 3.64 s | — |
-| bevel 400 edges (incl. boolean + cleanup) | 3.97 s | — |
+| bevel 400 edges (incl. boolean + cleanup) | 10.3 s | — |
 | first rendered frame after import | — | 7 ms |
-| hook (140 tris), bevel | 47 ms | — |
+| hook (126 tris, 68 edges), bevel | ~95 ms | — |
 
+The 1 M bevel is dominated by the Manifold boolean and cleanup on the full
+mesh; the previous kernel measures the same (9.9 s) on this machine.
 Above 300 k triangles the viewport switches to flat shading (facet normals in
 the shader) instead of merging creased normals, which keeps the first frame
 instant. The 1 M import is dominated by the worker's repair pass.
 
 ## Known limitations
 
-- The all-convex reference selection exports cleanly at the default width.
-  At a 0.3 mm width with clamping off, two sub-micron coplanar slivers remain
-  at the plate corner; they are detected, flagged and export-blocked.
-- Corners with more than three beveled edges, and the near-fold notch on the
-  reference hook, are joined by mitred overlap. The band is continuous and
-  watertight, but can show a crease at close range instead of a spherical blend.
-- With clamping off, a width far larger than the bend segments can still make
-  the band scallop; the clamps exist to prevent that.
-- Loop/ring and silhouette-sweep selection are not implemented; click and
-  paint are.
-- Concave edges are supported as additive fillets. A near-folded concave edge
-  can add a lot of material at a large width; the width clamp is the guard.
-- Pointer picking is linear in triangle count, so painting on a
-  1 M-triangle mesh is slow (no BVH yet).
+- Corner blends are spherical. With a non-circular profile (≠ 0.5) or a
+  chamfer (1 segment) the blend stays round, so it does not match the edge
+  profile exactly.
+- Corners that mix outside and inside bevels are mitred, except the common
+  case of an inside fillet between two beveled rims, where the rim wraps
+  around the fillet.
+- A corner where only some of the sharp edges are selected is mitred (the CAD
+  result), not blended.
+- With clamping on, a bevel is limited to half the wall or gap next to it;
+  with clamping off it can cut through thin walls.
+- Self-intersection checking is O(n²) and only runs on results up to 20 000
+  triangles.
 - WASM heap growth across repeated previews is not measured.
 
 ## Documentation

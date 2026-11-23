@@ -103,7 +103,7 @@ async function preview(request: Extract<WorkerRequest, { type: 'preview' }>): Pr
   }
 
   progress('Building bevel', 0.4);
-  const result = bevelMesh(source, request.edges, request.params, edgeTable?.maxWidth);
+  const result = bevelMesh(source, request.edges, request.params);
 
   const { mesh, bevelFaces, ...payload } = result;
   const positions = mesh.positions.slice();
@@ -139,7 +139,7 @@ async function exportStl(request: Extract<WorkerRequest, { type: 'export' }>): P
 
   progress('Applying bevel', 0.3);
   const params: BevelParams = request.params;
-  const result = bevelMesh(source, request.edges, params, edgeTable?.maxWidth);
+  const result = bevelMesh(source, request.edges, params);
   progress('Writing STL', 0.85);
 
   const bytes = meshToStl(result.mesh);

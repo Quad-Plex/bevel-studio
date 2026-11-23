@@ -1,5 +1,5 @@
 import { Button, Chip, Divider, Panel, Segmented, Slider, Toggle } from '../ui';
-import { countSelected, useApp } from '../state/store';
+import { BRUSH_MAX, BRUSH_MIN, countSelected, useApp } from '../state/store';
 import { exportModel } from '../state/export';
 
 /**
@@ -17,6 +17,10 @@ export function Inspector() {
   const setShowPreview = useApp((state) => state.setShowPreview);
   const showWireframe = useApp((state) => state.showWireframe);
   const setShowWireframe = useApp((state) => state.setShowWireframe);
+  const brush = useApp((state) => state.brush);
+  const setBrush = useApp((state) => state.setBrush);
+  const selectSharp = useApp((state) => state.selectSharp);
+  const clearSelection = useApp((state) => state.clearSelection);
 
   if (!meta) return null;
 
@@ -40,6 +44,44 @@ export function Inspector() {
         </div>
         <Chip tone={count > 0 ? 'accent' : 'neutral'}>{count > 0 ? 'Live' : 'Idle'}</Chip>
       </header>
+
+      <Divider />
+
+      <div className="field">
+        <span className="field-label">Brush picks</span>
+        <Segmented
+          value={brush.filter}
+          options={[
+            { value: 'all', label: 'All' },
+            { value: 'outside', label: 'Outside' },
+            { value: 'inside', label: 'Inside' },
+          ]}
+          onChange={(filter) => setBrush({ filter: filter as typeof brush.filter })}
+        />
+      </div>
+
+      <Slider
+        label="Brush size"
+        value={brush.radius}
+        min={BRUSH_MIN}
+        max={BRUSH_MAX}
+        step={1}
+        unit="px"
+        onChange={(radius) => setBrush({ radius })}
+        hint="[ and ] resize it in the viewport."
+      />
+
+      <div className="inspector-actions">
+        <Button size="sm" onClick={() => selectSharp('outside', true)}>
+          All outside
+        </Button>
+        <Button size="sm" onClick={() => selectSharp('inside', true)}>
+          All inside
+        </Button>
+        <Button size="sm" variant="ghost" onClick={clearSelection} disabled={count === 0}>
+          Clear
+        </Button>
+      </div>
 
       <Divider />
 
@@ -80,7 +122,7 @@ export function Inspector() {
         label="Clamp overlap"
         checked={params.clampOverlap}
         onChange={(clampOverlap) => setParams({ clampOverlap })}
-        description="Stop each edge before it runs into its neighbours."
+        description="Keep each bevel within the room the walls and gaps around it allow."
       />
       <Toggle
         label="Smooth shading"

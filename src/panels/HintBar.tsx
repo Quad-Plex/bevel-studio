@@ -6,11 +6,12 @@ interface Hint {
 }
 
 const HINTS: Hint[] = [
-  { keys: ['LMB'], label: 'Add edge' },
-  { keys: ['RMB'], label: 'Remove' },
+  { keys: ['LMB'], label: 'Brush add' },
+  { keys: ['RMB'], label: 'Brush remove' },
+  { keys: ['[', ']'], label: 'Brush size' },
   { keys: ['MMB'], label: 'Pan' },
   { keys: ['Wheel'], label: 'Zoom' },
-  { keys: ['A'], label: 'Select all' },
+  { keys: ['A'], label: 'Select outside' },
   { keys: ['F'], label: 'Fit' },
   { keys: ['W'], label: 'Wireframe' },
   { keys: ['Ctrl', 'Z'], label: 'Undo' },

@@ -1,61 +1,33 @@
 /**
- * Bevel kernel — the production cut-solid boolean bevel.
+ * Bevel kernel — rolling-ball bevels as sweep solids and a Manifold boolean.
  *
- * The kernel is deliberately synchronous after `initKernel()`: the worker
- * owns scheduling, cancellation and caching of parameters. `bevelMesh` takes
- * the repaired base mesh, the selected canonical edge ids, the shared
- * parameters and an optional per-edge `maxWidth` from the analyzer.
+ * The kernel is synchronous after `initKernel()`; the worker owns scheduling.
+ * `bevelMesh` takes the repaired base mesh, the selected canonical edge ids
+ * and the shared parameters.
  *
- * Pipeline (PLAN §4.4):
- *   1. rebuild the canonical edge table once per MeshData (cached by identity)
- *   2. clamp each selected edge independently (never a global minimum)
- *   3. build one closed sweep per edge, with the radius tapered to zero only
- *      at genuine terminations, plus rolling-ball corner solids at fully
- *      selected 3-face vertices
- *   4. convex sweeps are unioned and subtracted; concave sweeps (additive
- *      fillets) are unioned with the base, then the convex cut is subtracted
- *   5. drop zero-volume boolean fragments, weld at 1e-3 mm and rebuild the
- *      Manifold; on failure retry once with a 1e-4 mm arc inset
+ * Pipeline:
+ *   1. topology, base Manifold and (when clamping) a triangle BVH are built
+ *      once per MeshData and cached by identity
+ *   2. `planBevel` (plan.ts) turns the selection into sweeps with trim planes
+ *      and vertex blends: irregularities below the micro length are bridged,
+ *      widths are limited by real geometry (wall thickness, gaps), chain
+ *      joints are mitred, fully selected corners get a rolling-ball blend
+ *   3. concave sweeps/blends (inside fillets) are unioned with the base, then
+ *      the convex ones are unioned and subtracted
+ *   4. zero-volume fragments are dropped, the result is welded at 1e-3 mm and
+ *      validated; on failure it is retried once with a 1e-4 mm arc inset
  *
  * Units are millimetres. Nothing is rescaled or recentred.
- *
- * Clamp/taper policy (what the inspector should surface):
- *   - clampOverlap: each edge starts at min(width, 0.98 × maxWidth[e]); maxWidth is
- *     the caller's per-edge limit, or 0.45 × min(two adjacent altitudes,
- *     shortest incident edge) when the analyzer has not supplied one. There is
- *     deliberately no global minimum over the selection. A smooth chain whose
- *     segments are shorter than its width then shares the narrowest width of
- *     those short segments, so per-edge caps cannot scallop the band.
- *   - an edge clamped below 1 % of the requested width is skipped and reported,
- *     not silently beveled at a useless size.
- *   - selected edges form chains. At a vertex with two or more selected sharp
- *     edges the sweep keeps its full radius and is extended past the vertex by
- *     the miter length r·tan(turn/2), so neighbouring sweeps overlap instead of
- *     tapering into a gap. Only a genuine termination (exactly one selected
- *     sharp edge at the vertex) fades out, over min(r, 0.25 × L).
- *   - a fully selected 3-face vertex uses a rolling-ball corner solid (cut for
- *     convex, added for concave) and needs no miter extension.
- *   - a knife edge whose adjacent normals fold far past 90° has a fillet
- *     footprint r·tan(half) several times r along both faces. Carried at full
- *     radius into a cap face, that fillet ends in a vertical side wall meeting
- *     the cap at 90°. Such an edge fades over its own footprint at both caps.
- *   - edges shorter than 0.05 mm are not swept (they would only make boolean
- *     slivers); the neighbouring sweeps extend across them. A short edge with
- *     a real termination is beveled at min(r, 0.45 × L) instead of being
- *     dropped; chain-interior edges keep their full width.
  */
 import Module from 'manifold-3d';
 import type { ErrorStatus, Manifold, ManifoldToplevel } from 'manifold-3d';
 import { computeBasicMeta } from '../meta';
-import type { BevelParams, BevelResult, MeshData, MeshWarning, Vec3 } from '../types';
-import { buildCornerCut, buildEdgeCutSolid } from './cutSolid';
+import type { BevelParams, BevelResult, MeshData, MeshWarning } from '../types';
+import { buildBvh, type TriangleBvh } from './bvh';
+import { BAND, linkChains, planBevel, type PlannedSweep } from './plan';
 import { countSelfIntersections } from './selfIntersection';
-import {
-  buildTopology,
-  FLAT_DEGREES,
-  localMaxWidth,
-  type MeshTopology,
-} from './topology';
+import { buildChainSweep, buildVertexBlend, keepBelow } from './sweep';
+import { buildTopology, type MeshTopology } from './topology';
 
 const KERNEL_NAME = 'manifold-3d 3.5.5';
 const WELD_TOLERANCE = 1e-3;
@@ -125,12 +97,15 @@ export interface BevelKernelResult extends BevelResult {
   endWidths?: Float32Array;
   /** 1 when that endpoint fades to zero (a termination, not a chain joint). */
   endTapers?: Uint8Array;
+  /** vertex blends (rounded corners) in the result */
+  corners?: number;
 }
 
 // --- cached per-mesh topology and base solid --------------------------------
 
 interface CachedMesh {
   topo: MeshTopology;
+  bvh: TriangleBvh | null;
   base: Manifold;
   baseStatus: ErrorStatus;
   baseVolume: number;
@@ -147,9 +122,14 @@ function topologyFor(mesh: MeshData): CachedMesh {
   const base = meshToManifold(mesh, BASE_FACE_ID);
   const baseStatus = safeStatus(base);
   const baseVolume = safeVolume(base);
-  const entry: CachedMesh = { topo, base, baseStatus, baseVolume, baseShells: null };
+  const entry: CachedMesh = { topo, bvh: null, base, baseStatus, baseVolume, baseShells: null };
   cache.set(mesh, entry);
   return entry;
+}
+
+function bvhFor(cached: CachedMesh, mesh: MeshData): TriangleBvh {
+  if (!cached.bvh) cached.bvh = buildBvh(mesh);
+  return cached.bvh;
 }
 
 function baseShells(cached: CachedMesh): number {
@@ -379,43 +359,8 @@ function weldMesh(positions: Float32Array, indices: Uint32Array, tolerance: numb
   return { positions: new Float32Array(outPos), indices: outIdx };
 }
 
-// --- cut selection ----------------------------------------------------------
 
-interface EdgeJob {
-  edge: number;
-  /** index into the caller's selection, for appliedWidth */
-  index: number;
-  aVertex: number;
-  bVertex: number;
-  a: Vec3;
-  b: Vec3;
-  n1: Vec3;
-  n2: Vec3;
-  length: number;
-  radius: number;
-  /** true = additive fillet of a reflex edge */
-  concave: boolean;
-  /** linear fade length at A / B, mm */
-  taperA: number;
-  taperB: number;
-  /** joint-consistent radius at A / B, mm */
-  radiusA: number;
-  radiusB: number;
-  /** sweep overshoot past A / B to join a chain, mm */
-  extendA: number;
-  extendB: number;
-}
-
-interface CornerCandidate {
-  vertex: number;
-  position: Vec3;
-  normals: Vec3[];
-  radius: number;
-  concave: boolean;
-}
-
-/** Below this length a sweep is all boolean sliver and no visible bevel. */
-const MICRO_EDGE = 0.05;
+// --- boolean attempt bookkeeping -------------------------------------------
 
 interface CleanupResult {
   manifold: Manifold;
@@ -431,6 +376,8 @@ interface CleanupResult {
 }
 
 interface Attempt extends CleanupResult {
+  /** self-intersecting triangle pairs, computed on demand */
+  crossings?: number;
   buildMs: number;
   booleanMs: number;
   failedSolids: number;
@@ -511,16 +458,16 @@ function cleanup(raw: Manifold, baseVolume: number, instance: ManifoldToplevel):
 // --- public kernel ----------------------------------------------------------
 
 /**
- * Bevel the selected convex edges.
+ * Bevel the selected edges: convex edges are rounded off, concave edges get
+ * an inside fillet.
  *
  * @param mesh      repaired, outward-wound, immutable indexed mesh (mm)
  * @param edgeIds   canonical edge ids from `edgeOrder.ts`
- * @param params    shared bevel parameters; `clampOverlap` enables per-edge clamp
- * @param maxWidth  optional per-edge safe width from the analyzer, indexed by id
+ * @param params    shared bevel parameters; `clampOverlap` enables the
+ *                  geometric width limit
+ * @param maxWidth  optional explicit per-edge cap, indexed by edge id; applied
+ *                  only with `clampOverlap`
  * @param options   diagnostics only; production uses the defaults
- *
- * The mesh must be treated as immutable: the kernel caches its edge table and
- * base Manifold by object identity so a slider drag does not rebuild them.
  */
 export function bevelMesh(
   mesh: MeshData,
@@ -540,11 +487,8 @@ export function bevelMesh(
   const requested = Number.isFinite(params.width) ? Math.max(0, params.width) : 0;
   const segments = clampInt(params.segments, 1, 12);
   const profile = Number.isFinite(params.profile) ? Math.max(0, Math.min(1, params.profile)) : 0.5;
-  const taperMode = options.taper ?? 'auto';
   const wantCorners = options.corners !== false;
-
-  const selectionCount = edgeIds.length;
-  const appliedWidth = new Float32Array(selectionCount);
+  const sphereSegments = clampInt(options.cornerSegments ?? segments * 4, 12, 32);
 
   if (!(requested > 1e-9)) {
     warnings.push({
@@ -552,319 +496,59 @@ export function bevelMesh(
       severity: 'warning',
       message: 'Width is zero; nothing was beveled.',
     });
-    return emptyResult(mesh, cached, appliedWidth, warnings, started);
+    return emptyResult(mesh, cached, new Float32Array(edgeIds.length), warnings, started);
   }
 
-  // --- selection, per-edge clamp -------------------------------------------
-  interface SelectedEdge {
-    index: number;
-    edge: number;
-    aVertex: number;
-    bVertex: number;
-    length: number;
-    radius: number;
-    concave: boolean;
-  }
+  const bvh = params.clampOverlap ? bvhFor(cached, mesh) : null;
+  const plan = planBevel(
+    mesh,
+    topo,
+    edgeIds,
+    params,
+    requested,
+    bvh,
+    options.taper ?? 'auto',
+    params.clampOverlap ? maxWidth : undefined,
+  );
+  if (!wantCorners) plan.blends.length = 0;
+  const { appliedWidth } = plan;
+  const chains = linkChains(plan.sweeps);
 
-  const selected: SelectedEdge[] = [];
-  const widthByEdge = new Float32Array(topo.edgeCount);
-  let unusable = 0;
-  let narrow = 0;
-  let micro = 0;
-
-  for (let i = 0; i < selectionCount; i++) {
-    const e = edgeIds[i];
-    if (!Number.isInteger(e) || e < 0 || e >= topo.edgeCount) {
-      unusable++;
-      continue;
-    }
-    const kind = topo.convex[e];
-    if (kind !== 0 && kind !== 1) {
-      unusable++;
-      continue;
-    }
-
-    const length = topo.length[e];
-    if (!(length > 1e-9)) {
-      micro++;
-      continue;
-    }
-
-    let radius = requested;
-    if (params.clampOverlap) {
-      const limit =
-        maxWidth && e < maxWidth.length ? maxWidth[e] : localMaxWidth(topo, mesh, e);
-      if (Number.isFinite(limit) && limit >= 0) radius = Math.min(radius, 0.98 * limit);
-    }
-
-    // A bevel narrower than 1 % of the request is visually nothing and makes
-    // fragile slivers; skip it and tell the UI instead of silently shrinking.
-    // It stays in the selection below so neighbouring sweeps still join it.
-    selected.push({
-      index: i,
-      edge: e,
-      aVertex: topo.v[e * 2],
-      bVertex: topo.v[e * 2 + 1],
-      length,
-      radius,
-      concave: kind === 0,
-    });
-  }
-
-  // Selected edges incident to a vertex. This is the chain graph: it includes
-  // edges too short or too narrow to sweep, so their neighbours never mistake
-  // a collapsed chain link for a real termination. See the module comment.
-  const incident = new Map<number, { edge: number; other: number; concave: boolean }[]>();
-  const addIncident = (vertex: number, edge: number, other: number, concave: boolean) => {
-    const entry = { edge, other, concave };
-    const list = incident.get(vertex);
-    if (list) list.push(entry);
-    else incident.set(vertex, [entry]);
-  };
-  for (const item of selected) {
-    addIncident(item.aVertex, item.edge, item.bVertex, item.concave);
-    addIncident(item.bVertex, item.edge, item.aVertex, item.concave);
-  }
-
-  const position = mesh.positions;
-  const direction = (vertex: number, other: number): Vec3 | null => {
-    const dx = position[other * 3] - position[vertex * 3];
-    const dy = position[other * 3 + 1] - position[vertex * 3 + 1];
-    const dz = position[other * 3 + 2] - position[vertex * 3 + 2];
-    const length = Math.hypot(dx, dy, dz);
-    if (length < 1e-9) return null;
-    return [dx / length, dy / length, dz / length];
-  };
-
-  /**
-   * How far a sweep must run past a chain joint to cover the wedge the next
-   * sweep leaves open. For a turn of θ the surface bands of the two sweeps
-   * meet at the miter line, r·tan(θ/2) past the vertex; the 3-D corner is
-   * covered by the same overshoot. `turn` is π minus the angle between the two
-   * outgoing edge directions (180° = straight continuation).
-   *
-   * Near-parallel outgoing edges (a collapsed notch/tessellation edge) are
-   * ignored: they lie inside this sweep's own band and would read as a 180°
-   * fold-back.
-   */
-  const jointExtension = (job: EdgeJob, vertex: number, other: number): number => {
-    const list = incident.get(vertex);
-    if (!list) return 0;
-    const d = direction(vertex, other);
-    if (!d) return 0;
-    let best = 0;
-    for (const item of list) {
-      if (item.edge === job.edge) continue;
-      const w = direction(vertex, item.other);
-      if (!w) continue;
-      const cos = Math.max(-1, Math.min(1, d[0] * w[0] + d[1] * w[1] + d[2] * w[2]));
-      const phi = Math.acos(cos);
-      if (phi < Math.PI / 18) continue; // < 10°: same ray, no joint wedge
-      const turn = Math.PI - phi;
-      best = Math.max(best, job.radius * Math.tan(Math.min(turn, (2 * Math.PI) / 3) / 2));
-    }
-    if (!(best > 0)) return 0;
-    // Even a straight joint gets a small overlap so the two end caps are not
-    // exactly coincident coplanar faces in the boolean.
-    best = Math.max(best, job.radius * 0.1);
-    return Math.min(best, job.radius * 2, job.length * 0.45);
-  };
-
-  const vertexCount = position.length / 3;
-  /**
-   * A shallow (~8°) unselected concave crease often hides a real face break
-   * (the plate end of the reference hook). Carrying a convex sweep across it
-   * cuts the far side and leaves teeth, so the chain ends there. Larger
-   * concave creases are genuine inside corners; the convex rim continues
-   * across them as before.
-   */
-  const selectedMask = new Uint8Array(topo.edgeCount);
-  for (const item of selected) selectedMask[item.edge] = 1;
-  const blockedByConcave = new Uint8Array(vertexCount);
-  for (let v = 0; v < vertexCount; v++) {
-    for (let i = topo.vertexOffset[v]; i < topo.vertexOffset[v + 1]; i++) {
-      const e = topo.vertexEdges[i];
-      if (topo.dihedral[e] < FLAT_DEGREES || topo.dihedral[e] >= 20) continue;
-      if (topo.convex[e] === 0 && selectedMask[e] === 0) {
-        blockedByConcave[v] = 1;
-        break;
-      }
-    }
-  }
-
-  const jobs: EdgeJob[] = [];
-  for (const item of selected) {
-    if (item.length < MICRO_EDGE) {
-      micro++;
-      continue;
-    }
-    const listA = incident.get(item.aVertex);
-    const listB = incident.get(item.bVertex);
-    const jointA = (listA?.length ?? 0) >= 2;
-    const jointB = (listB?.length ?? 0) >= 2;
-    let radius = item.radius;
-    // A short edge with a real termination cannot fit the requested radius
-    // plus its taper. Bevel it at the largest width that fits instead of
-    // dropping it. Edges inside a chain keep their full width because the
-    // neighbouring sweeps cover both joints.
-    if ((!jointA || !jointB) && item.length < 4 * radius) {
-      radius = Math.min(radius, 0.45 * item.length);
-    }
-    if (!(radius > 0) || radius < requested * 0.01) {
-      narrow++;
-      continue;
-    }
-
-    appliedWidth[item.index] = radius;
-    widthByEdge[item.edge] = radius;
-    jobs.push({
-      edge: item.edge,
-      index: item.index,
-      aVertex: item.aVertex,
-      bVertex: item.bVertex,
-      a: [
-        position[item.aVertex * 3],
-        position[item.aVertex * 3 + 1],
-        position[item.aVertex * 3 + 2],
-      ],
-      b: [
-        position[item.bVertex * 3],
-        position[item.bVertex * 3 + 1],
-        position[item.bVertex * 3 + 2],
-      ],
-      n1: [topo.normals[item.edge * 6], topo.normals[item.edge * 6 + 1], topo.normals[item.edge * 6 + 2]],
-      n2: [topo.normals[item.edge * 6 + 3], topo.normals[item.edge * 6 + 4], topo.normals[item.edge * 6 + 5]],
-      length: item.length,
-      radius,
-      concave: item.concave,
-      taperA: 0,
-      taperB: 0,
-      radiusA: radius,
-      radiusB: radius,
-      extendA: 0,
-      extendB: 0,
-    });
-  }
-
-  // --- chain-consistent clamp -----------------------------------------------
-  // A smooth chain whose segments are shorter than its bevel width produces a
-  // sawtooth: each short sweep ends in its own cap and the caps alternate with
-  // the neighbours. Per-edge clamping cannot prevent that because every edge
-  // is individually "safe". Give a smooth component one width instead — the
-  // narrowest edge in it — so the band stays continuous. Applied only when the
-  // component actually contains an edge shorter than 4× its width, so long
-  // straight chains keep their requested widths.
-  {
-    const vertexJobs = new Map<number, number[]>();
-    const addJob = (vertex: number, job: number) => {
-      const list = vertexJobs.get(vertex);
-      if (list) list.push(job);
-      else vertexJobs.set(vertex, [job]);
-    };
-    jobs.forEach((job, index) => {
-      addJob(job.aVertex, index);
-      addJob(job.bVertex, index);
-    });
-
-    const parent = jobs.map((_, index) => index);
-    const find = (x: number): number => {
-      let root = x;
-      while (parent[root] !== root) root = parent[root];
-      while (parent[x] !== root) {
-        const next = parent[x];
-        parent[x] = root;
-        x = next;
-      }
-      return root;
-    };
-    const union = (a: number, b: number) => {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra !== rb) parent[rb] = ra;
-    };
-
-    const SMOOTH_TURN = Math.cos((30 * Math.PI) / 180);
-    for (const [vertex, list] of vertexJobs) {
-      for (let i = 0; i < list.length; i++) {
-        for (let j = i + 1; j < list.length; j++) {
-          const a = jobs[list[i]];
-          const b = jobs[list[j]];
-          const da = direction(vertex, a.aVertex === vertex ? a.bVertex : a.aVertex);
-          const db = direction(vertex, b.aVertex === vertex ? b.bVertex : b.aVertex);
-          if (!da || !db) continue;
-          const dot = da[0] * db[0] + da[1] * db[1] + da[2] * db[2];
-          // Outgoing directions at a smooth continuation point opposite ways.
-          if (dot < -SMOOTH_TURN) union(list[i], list[j]);
-        }
-      }
-    }
-
-    const components = new Map<number, number[]>();
-    for (let index = 0; index < jobs.length; index++) {
-      const root = find(index);
-      const list = components.get(root);
-      if (list) list.push(index);
-      else components.set(root, [index]);
-    }
-
-    for (const component of components.values()) {
-      if (component.length < 2) continue;
-      // Only the edges that are short relative to the width drive the clamp;
-      // a long edge elsewhere in the component with a tiny local limit must
-      // not shrink the whole chain.
-      let narrowest = Infinity;
-      for (const index of component) {
-        const job = jobs[index];
-        if (job.length < 4 * job.radius) narrowest = Math.min(narrowest, job.radius);
-      }
-      if (!Number.isFinite(narrowest)) continue;
-      for (const index of component) {
-        const job = jobs[index];
-        const next = Math.min(job.radius, narrowest);
-        if (next < job.radius) {
-          job.radius = next;
-          appliedWidth[job.index] = next;
-        }
-      }
-    }
-  }
-
-  const concaveJobs = jobs.filter((job) => job.concave).length;
-  if (concaveJobs > 0) {
+  const concaveCount = plan.sweeps.filter((s) => s.concave).length;
+  if (concaveCount > 0) {
     warnings.push({
       code: 'bevel.fillet',
       severity: 'info',
-      message: `Added fillet material on ${concaveJobs} concave edge${concaveJobs === 1 ? '' : 's'}.`,
+      message: `Added inside fillets on ${concaveCount} concave edge${concaveCount === 1 ? '' : 's'}.`,
     });
   }
-  if (unusable > 0) {
+  if (plan.unusable > 0) {
     warnings.push({
       code: 'bevel.unusable',
       severity: 'warning',
-      message: `Skipped ${unusable} edge${unusable === 1 ? '' : 's'} that ${unusable === 1 ? 'is' : 'are'} not two-sided.`,
+      message: `Skipped ${plan.unusable} edge${plan.unusable === 1 ? '' : 's'} that ${plan.unusable === 1 ? 'is' : 'are'} flat or not two-sided.`,
     });
   }
-  if (narrow > 0) {
+  if (plan.narrow > 0) {
     warnings.push({
       code: 'bevel.narrow',
       severity: 'warning',
-      message: `Skipped ${narrow} edge${narrow === 1 ? '' : 's'} with no room at the requested width.`,
+      message: `Skipped ${plan.narrow} edge${plan.narrow === 1 ? '' : 's'} with no room at the requested width.`,
     });
   }
-  if (micro > 0) {
+  if (plan.micro > 0) {
     warnings.push({
       code: 'bevel.short',
       severity: 'info',
-      message: `Collapsed ${micro} edge${micro === 1 ? '' : 's'} shorter than ${formatMm(MICRO_EDGE)} mm; neighbouring bevels extend across.`,
+      message: `Bridged ${plan.micro} edge${plan.micro === 1 ? '' : 's'} shorter than ${formatMm(plan.microLength)} mm; the bevel runs across ${plan.micro === 1 ? 'it' : 'them'}.`,
     });
   }
 
-
   let clampedEdges = 0;
   let narrowestClamp = Infinity;
-  for (let i = 0; i < selectionCount; i++) {
+  for (let i = 0; i < appliedWidth.length; i++) {
     const w = appliedWidth[i];
-    if (w > 0 && w < requested - 1e-9) {
+    if (w > 0 && w < requested - 1e-6) {
       clampedEdges++;
       if (w < narrowestClamp) narrowestClamp = w;
     }
@@ -873,230 +557,19 @@ export function bevelMesh(
     warnings.push({
       code: 'bevel.clamped',
       severity: 'info',
-      message: `Width limited on ${clampedEdges} edge${clampedEdges === 1 ? '' : 's'}; the narrowest is ${formatMm(narrowestClamp)} mm.`,
+      message: `Width limited by the surrounding geometry on ${clampedEdges} edge${clampedEdges === 1 ? '' : 's'}; the narrowest is ${formatMm(narrowestClamp)} mm.`,
     });
   }
-
-  if (jobs.length === 0) {
-    return emptyResult(mesh, cached, appliedWidth, warnings, started);
-  }
-
-  let mixedCorners = 0;
-  for (const list of incident.values()) {
-    if (list.length < 2) continue;
-    let hasConvex = false;
-    let hasConcave = false;
-    for (const item of list) {
-      if (item.concave) hasConcave = true;
-      else hasConvex = true;
-    }
-    if (hasConvex && hasConcave) mixedCorners++;
-  }
-
-  // --- corners -------------------------------------------------------------
-  const cornerOk = new Uint8Array(vertexCount);
-  /** 1 when the three face normals are mutually orthogonal; `box − sphere` is
-   * exact there. Skew corners also get a miter overlap from their sweeps. */
-  const cornerOrthogonal = new Uint8Array(vertexCount);
-  const cornerCandidates: CornerCandidate[] = [];
-  const probeSolids: (Manifold | null)[] = [];
-  let unsupportedCorners = 0;
-
-  if (wantCorners) {
-    const cornerSegments = clampInt(options.cornerSegments ?? segments * 2, 8, 12);
-    for (let v = 0; v < vertexCount; v++) {
-      const start = topo.vertexOffset[v];
-      const end = topo.vertexOffset[v + 1];
-      let sharp = 0;
-      let allBeveled = true;
-      let allConvex = true;
-      let allConcave = true;
-      let minRadius = Infinity;
-      const normals: Vec3[] = [];
-
-      for (let i = start; i < end; i++) {
-        const e = topo.vertexEdges[i];
-        if (topo.dihedral[e] < FLAT_DEGREES) continue;
-        sharp++;
-        if (!(widthByEdge[e] > 0)) allBeveled = false;
-        if (topo.convex[e] !== 1) allConvex = false;
-        if (topo.convex[e] !== 0) allConcave = false;
-        if (widthByEdge[e] > 0 && widthByEdge[e] < minRadius) minRadius = widthByEdge[e];
-        addUniqueNormal(normals, topo.normals, e * 6);
-        addUniqueNormal(normals, topo.normals, e * 6 + 3);
-      }
-
-      if (sharp !== 3 || !allBeveled) continue;
-      if ((!allConvex && !allConcave) || normals.length !== 3 || !Number.isFinite(minRadius)) {
-        unsupportedCorners++;
-        continue;
-      }
-
-      const candidate: CornerCandidate = {
-        vertex: v,
-        position: [position[v * 3], position[v * 3 + 1], position[v * 3 + 2]],
-        normals,
-        radius: minRadius,
-        concave: allConcave,
-      };
-
-      let solid: Manifold | null = null;
-      try {
-        solid = buildCornerCut(
-          instance,
-          candidate.position,
-          normals,
-          minRadius,
-          cornerSegments,
-          0,
-          1e-3,
-          candidate.concave,
-        );
-      } catch {
-        solid = null;
-      }
-      if (!solid) {
-        unsupportedCorners++;
-        continue;
-      }
-      cornerOk[v] = 1;
-      const [na, nb, nc] = normals;
-      if (
-        Math.abs(na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]) < 1e-3 &&
-        Math.abs(na[0] * nc[0] + na[1] * nc[1] + na[2] * nc[2]) < 1e-3 &&
-        Math.abs(nb[0] * nc[0] + nb[1] * nc[1] + nb[2] * nc[2]) < 1e-3
-      ) {
-        cornerOrthogonal[v] = 1;
-      }
-      cornerCandidates.push(candidate);
-      probeSolids.push(solid);
-    }
-  }
-
-  // Joint-consistent width: every sweep meeting at a vertex starts/ends at
-  // the same radius (the narrowest incident built edge). The sweep interpolates
-  // linearly along the edge, so a chain of different clamps becomes a smooth
-  // band instead of per-segment scallops.
-  const vertexWidth = new Float32Array(vertexCount).fill(Infinity);
-  for (const job of jobs) {
-    if (job.radius < vertexWidth[job.aVertex]) vertexWidth[job.aVertex] = job.radius;
-    if (job.radius < vertexWidth[job.bVertex]) vertexWidth[job.bVertex] = job.radius;
-  }
-
-  for (const job of jobs) {
-    const listA = incident.get(job.aVertex);
-    const listB = incident.get(job.bVertex);
-    const jointA = (listA?.length ?? 0) >= 2 && blockedByConcave[job.aVertex] === 0;
-    const jointB = (listB?.length ?? 0) >= 2 && blockedByConcave[job.bVertex] === 0;
-
-    // A knife edge (faces folded far past 90°) has a fillet footprint
-    // r·tan(halfAngle) several times r along both faces. If that wide fillet is
-    // carried at full radius into a cap face it leaves a vertical side wall
-    // meeting the cap at 90° — the hook notch's step. Fade such an edge out
-    // over its own footprint at both caps instead.
-    const nd = Math.max(
-      -1,
-      Math.min(1, job.n1[0] * job.n2[0] + job.n1[1] * job.n2[1] + job.n1[2] * job.n2[2]),
-    );
-    const footprint = job.radius * Math.tan(Math.acos(nd) / 2);
-    const capTaper = footprint > job.radius * 2 ? Math.min(footprint, 0.45 * job.length) : 0;
-    if (taperMode !== 'none' && capTaper > 0) {
-      job.taperA = capTaper;
-      job.taperB = capTaper;
-    } else {
-      job.taperA = taperMode === 'none' || cornerOk[job.aVertex] || jointA
-        ? 0
-        : Math.min(job.radius, 0.25 * job.length);
-      job.taperB = taperMode === 'none' || cornerOk[job.bVertex] || jointB
-        ? 0
-        : Math.min(job.radius, 0.25 * job.length);
-    }
-
-    // A 3-face corner sphere is only as large as the narrowest incident edge.
-    // If this edge is wider, fade it into the sphere instead of ending in a
-    // full-width step.
-    if (job.taperA === 0 && cornerOk[job.aVertex]) {
-      let target = job.radius;
-      for (const entry of incident.get(job.aVertex) ?? []) {
-        if (entry.edge === job.edge) continue;
-        const w = widthByEdge[entry.edge];
-        if (w > 0 && w < target) target = w;
-      }
-      if (target < job.radius - 1e-6) {
-        job.taperA = Math.min(2 * job.radius, 0.5 * job.length);
-      }
-    }
-    if (job.taperB === 0 && cornerOk[job.bVertex]) {
-      let target = job.radius;
-      for (const entry of incident.get(job.bVertex) ?? []) {
-        if (entry.edge === job.edge) continue;
-        const w = widthByEdge[entry.edge];
-        if (w > 0 && w < target) target = w;
-      }
-      if (target < job.radius - 1e-6) {
-        job.taperB = Math.min(2 * job.radius, 0.5 * job.length);
-      }
-    }
-
-    if (job.taperA === 0 && job.taperB === 0) {
-      job.radiusA = Math.min(job.radius, vertexWidth[job.aVertex]);
-      job.radiusB = Math.min(job.radius, vertexWidth[job.bVertex]);
-    }
-
-    // A joint keeps the full radius and overshoots the vertex, so the next
-    // sweep's band meets it. An orthogonal 3-face corner is already closed by
-    // its `box − sphere` solid; a skew one also gets this miter overlap.
-    const cornerA = cornerOk[job.aVertex] === 1 && cornerOrthogonal[job.aVertex] === 1;
-    const cornerB = cornerOk[job.bVertex] === 1 && cornerOrthogonal[job.bVertex] === 1;
-    if (jointA && job.taperA === 0 && !cornerA) {
-      job.extendA = jointExtension(job, job.aVertex, job.bVertex);
-    }
-    if (jointB && job.taperB === 0 && !cornerB) {
-      job.extendB = jointExtension(job, job.bVertex, job.aVertex);
-    }
-
-    const dx = job.b[0] - job.a[0];
-    const dy = job.b[1] - job.a[1];
-    const dz = job.b[2] - job.a[2];
-    const length = Math.hypot(dx, dy, dz);
-    if (length > 1e-9) {
-      const scaleA = job.extendA / length;
-      const scaleB = job.extendB / length;
-      job.a[0] -= dx * scaleA;
-      job.a[1] -= dy * scaleA;
-      job.a[2] -= dz * scaleA;
-      job.b[0] += dx * scaleB;
-      job.b[1] += dy * scaleB;
-      job.b[2] += dz * scaleB;
-    }
-  }
-
-  const endWidths = new Float32Array(selectionCount * 2);
-  const endTapers = new Uint8Array(selectionCount * 2);
-  const jobByEdge = new Map<number, EdgeJob>();
-  for (const job of jobs) jobByEdge.set(job.edge, job);
-  for (const item of selected) {
-    const job = jobByEdge.get(item.edge);
-    if (!job) continue;
-    endWidths[item.index * 2] = job.taperA > 0 ? 0 : job.radiusA;
-    endWidths[item.index * 2 + 1] = job.taperB > 0 ? 0 : job.radiusB;
-    endTapers[item.index * 2] = job.taperA > 0 ? 1 : 0;
-    endTapers[item.index * 2 + 1] = job.taperB > 0 ? 1 : 0;
-  }
-
-  if (unsupportedCorners > 0) {
-    warnings.push({
-      code: 'bevel.corner',
-      severity: 'info',
-      message: `${unsupportedCorners} corner${unsupportedCorners === 1 ? '' : 's'} ${unsupportedCorners === 1 ? 'was' : 'were'} joined by mitred overlap instead of a spherical patch.`,
-    });
-  }
-  if (mixedCorners > 0) {
+  if (plan.mixedNodes > 0) {
     warnings.push({
       code: 'bevel.mixedCorner',
       severity: 'info',
-      message: `${mixedCorners} corner${mixedCorners === 1 ? '' : 's'} mix convex and concave bevels; they are joined by overlap.`,
+      message: `${plan.mixedNodes} corner${plan.mixedNodes === 1 ? '' : 's'} mix outside and inside bevels; they are mitred, not blended.`,
     });
+  }
+
+  if (plan.sweeps.length === 0) {
+    return emptyResult(mesh, cached, appliedWidth, warnings, started);
   }
 
   // --- one boolean attempt -------------------------------------------------
@@ -1106,58 +579,33 @@ export function bevelMesh(
     const fillSolids: Manifold[] = [];
     let failedSolids = 0;
     let failedCorners = 0;
-    for (const job of jobs) {
-      const raw = buildEdgeCutSolid(job.a, job.b, job.n1, job.n2, {
-        radius: job.radius,
-        segments,
-        profile,
-        inset,
-        taperA: job.taperA,
-        taperB: job.taperB,
-        radiusA: job.radiusA,
-        radiusB: job.radiusB,
-        taperStations: 1,
-        // A 1e-3 mm overshoot keeps the sweep's side walls from being exactly
-        // coplanar with the base faces in the boolean. It lies outside a
-        // convex solid and inside a concave one, so neither changes volume.
-        // With 0 the outside-only hook selection self-intersects; with this
-        // offset it stays clean.
-        extend: 1e-3,
-        concave: job.concave,
-      });
-      if (!raw) {
-        failedSolids++;
+
+    for (const chain of chains) {
+      const solid = buildPlannedChain(chain, segments, profile, inset);
+      if (!solid) {
+        failedSolids += chain.length;
         continue;
       }
-      try {
-        (job.concave ? fillSolids : cutSolids).push(meshToManifold(raw));
-      } catch {
-        failedSolids++;
-      }
+      (chain[0].concave ? fillSolids : cutSolids).push(solid);
     }
 
-    for (let i = 0; i < cornerCandidates.length; i++) {
-      const candidate = cornerCandidates[i];
-      let solid: Manifold | null;
-      if (inset === 0) {
-        solid = probeSolids[i];
-      } else {
-        try {
-          solid = buildCornerCut(
+    for (const blend of plan.blends) {
+      let solid: Manifold | null = null;
+      try {
+        solid =
+          buildVertexBlend(
             instance,
-            candidate.position,
-            candidate.normals,
-            candidate.radius,
-            clampInt(options.cornerSegments ?? segments * 2, 8, 12),
+            blend.planes,
+            blend.point,
+            blend.radius,
+            blend.concave,
+            sphereSegments,
             inset,
-            1e-3,
-            candidate.concave,
-          );
-        } catch {
-          solid = null;
-        }
+          )?.solid ?? null;
+      } catch {
+        solid = null;
       }
-      if (solid) (candidate.concave ? fillSolids : cutSolids).push(solid);
+      if (solid) (blend.concave ? fillSolids : cutSolids).push(solid);
       else failedCorners++;
     }
 
@@ -1166,8 +614,7 @@ export function bevelMesh(
 
     let raw: Manifold;
     try {
-      // Additive fillets first, then the convex cuts: the two sets touch at
-      // mixed corners, and this order keeps each sweep's own result intact.
+      // Inside fillets first, then the outside cuts.
       let working = base;
       if (fillSolids.length > 0) {
         const fill = fillSolids.length === 1 ? fillSolids[0] : instance.Manifold.union(fillSolids);
@@ -1263,21 +710,37 @@ export function bevelMesh(
 
   let buildMs = 0;
   let booleanMs = 0;
+  // Manifold status proves topology, not geometry: a mesh can be closed and
+  // still have triangles passing through each other. Only check small results
+  // (the O(n²) SAT pass would dominate a million-triangle export).
+  const crossings = (a: Attempt): number => {
+    if (!a.ok || a.mesh.indices.length / 3 > 20_000) return 0;
+    if (a.crossings === undefined) a.crossings = countSelfIntersections(a.mesh);
+    return a.crossings;
+  };
   const first = attempt(0);
   buildMs += first.buildMs;
   booleanMs += first.booleanMs;
   let chosen = first;
 
-  if (!first.ok) {
+  if (!first.ok || crossings(first) > 0) {
+    // A sub-micron coincidence between two solids is the usual cause; pulling
+    // every arc in by 1e-4 mm moves the contacts apart.
     const second = attempt(RETRY_INSET);
     buildMs += second.buildMs;
     booleanMs += second.booleanMs;
-    const score = (a: Attempt) => (a.ok ? 2 : a.status === 'NoError' ? 1 : 0);
-    chosen = score(second) >= score(first) ? second : first;
+    const score = (a: Attempt) =>
+      (a.ok ? 4 : a.status === 'NoError' ? 2 : 0) + (a.ok && crossings(a) === 0 ? 1 : 0);
+    const better =
+      score(second) > score(first) ||
+      (score(second) === score(first) && crossings(second) < crossings(first));
+    if (better) chosen = second;
     warnings.push({
       code: 'bevel.retry',
       severity: 'info',
-      message: 'The first result was not watertight; retried once with a 1e-4 mm arc inset.',
+      message: first.ok
+        ? 'The first result had crossing triangles; retried once with a 1e-4 mm arc inset.'
+        : 'The first result was not watertight; retried once with a 1e-4 mm arc inset.',
     });
   }
 
@@ -1285,14 +748,14 @@ export function bevelMesh(
     warnings.push({
       code: 'bevel.cutSolid',
       severity: 'warning',
-      message: `${chosen.failedSolids} cut solid${chosen.failedSolids === 1 ? '' : 's'} could not be built and ${chosen.failedSolids === 1 ? 'was' : 'were'} skipped.`,
+      message: `${chosen.failedSolids} edge sweep${chosen.failedSolids === 1 ? '' : 's'} could not be built and ${chosen.failedSolids === 1 ? 'was' : 'were'} skipped.`,
     });
   }
   if (chosen.failedCorners > 0) {
     warnings.push({
-      code: 'bevel.cornerSolid',
+      code: 'bevel.corner',
       severity: 'info',
-      message: `${chosen.failedCorners} corner sphere${chosen.failedCorners === 1 ? '' : 's'} could not be built and ${chosen.failedCorners === 1 ? 'was' : 'were'} skipped.`,
+      message: `${chosen.failedCorners} corner blend${chosen.failedCorners === 1 ? '' : 's'} could not be built; ${chosen.failedCorners === 1 ? 'that corner is' : 'those corners are'} mitred instead.`,
     });
   }
   if (chosen.droppedComponents > 0) {
@@ -1315,7 +778,7 @@ export function bevelMesh(
       severity: 'error',
       message: `The beveled mesh did not pass the watertight check (${chosen.status}); returning the closest result.`,
     });
-  } else if (chosen.shells > 1) {
+  } else if (chosen.shells > baseShells(cached)) {
     warnings.push({
       code: 'bevel.shells',
       severity: 'warning',
@@ -1324,18 +787,18 @@ export function bevelMesh(
   }
 
   const removed = volumeBefore - chosen.volume;
-  const hasAdditive = concaveJobs > 0;
+  const hasAdditive = concaveCount > 0;
   if (removed < -1e-6 && !hasAdditive) {
     warnings.push({
       code: 'bevel.volumeGain',
       severity: 'error',
       message: 'The bevel added material instead of removing it; check the mesh orientation.',
     });
-  } else if (removed <= 1e-6 && !hasAdditive) {
+  } else if (Math.abs(removed) <= 1e-6) {
     warnings.push({
       code: 'bevel.volumeUnchanged',
       severity: 'warning',
-      message: 'The bevel removed no material.',
+      message: 'The bevel changed no material.',
     });
   }
 
@@ -1346,24 +809,16 @@ export function bevelMesh(
   meta.shells = chosen.shells;
   meta.watertight = chosen.ok;
 
-  // Manifold status proves topology, not geometry: a mesh can be closed and
-  // still have triangles passing through each other. Only check small results
-  // (the O(n²) SAT pass would dominate a million-triangle export).
   const triangleCount = chosen.mesh.indices.length / 3;
-  let selfIntersections = 0;
-  if (chosen.ok && triangleCount <= 20_000) {
-    selfIntersections = countSelfIntersections(chosen.mesh);
-    if (selfIntersections > 0) {
-      warnings.push({
-        code: 'bevel.selfIntersection',
-        severity: 'error',
-        message: `The bevel produced ${selfIntersections} self-intersecting triangle pairs. Reduce the width or deselect the tight corners before exporting.`,
-      });
-    }
+  const selfIntersections = crossings(chosen);
+  if (selfIntersections > 0) {
+    warnings.push({
+      code: 'bevel.selfIntersection',
+      severity: 'error',
+      message: `The bevel produced ${selfIntersections} self-intersecting triangle pairs. Reduce the width or deselect the tight corners before exporting.`,
+    });
   }
 
-  // The Manifold status is the topological guarantee; edge-use counts are the
-  // analyzer's job and stay at the MeshMeta default here.
   meta.boundaryEdges = 0;
   meta.nonManifoldEdges = 0;
   meta.genus = genusOf(chosen);
@@ -1382,9 +837,110 @@ export function bevelMesh(
     manifold: chosen.ok,
     selfIntersections,
     bevelFaces: bevelMask(chosen.faceIds, triangleCount),
-    endWidths,
-    endTapers,
+    endWidths: plan.endWidths,
+    endTapers: plan.endTapers,
+    corners: plan.blends.length,
   };
+}
+
+/**
+ * Chain → Manifold, trimmed by the planes at its two free ends. When a trim
+ * would leave nothing, falls back to the plain sweep without extensions.
+ */
+function buildPlannedChain(
+  chain: PlannedSweep[],
+  segments: number,
+  profile: number,
+  inset: number,
+): Manifold | null {
+  const make = (extended: boolean): Manifold | null => {
+    const raw = buildChainSweep(
+      chain.map((sweep) => ({
+        a: sweep.a,
+        b: sweep.b,
+        n1: sweep.n1,
+        n2: sweep.n2,
+        concave: sweep.concave,
+        radiusA: sweep.radiusA,
+        radiusB: sweep.radiusB,
+        taperA: sweep.taperA,
+        taperB: sweep.taperB,
+        extendA: extended ? sweep.extendA : 0,
+        extendB: extended ? sweep.extendB : 0,
+        segments,
+        profile,
+        band: BAND,
+        inset,
+      })),
+    );
+    if (!raw) return null;
+    let solid: Manifold;
+    try {
+      solid = meshToManifold(raw);
+    } catch {
+      return null;
+    }
+    if (!extended) return solid;
+    const head = chain[0];
+    const tail = chain[chain.length - 1];
+    if (chain.length === 1 && head.clipsA.length + head.clipsB.length > 0 && isShortSweep(head)) {
+      // one short edge: whole-solid trims are exact and cheaper
+      for (const clip of [...head.clipsA, ...head.clipsB]) solid = keepBelow(solid, clip.n, clip.c);
+      return solid;
+    }
+    // Trim planes are infinite, but a long or curved chain may pass the plane
+    // of its other end far away. Each trim only acts near its own end.
+    for (const [clips, center, reach] of [
+      [head.clipsA, head.a, trimReach(head, 0)],
+      [tail.clipsB, tail.b, trimReach(tail, 1)],
+    ] as const) {
+      for (const clip of clips) solid = trimNear(solid, clip.n, clip.c, center, reach);
+    }
+    return solid;
+  };
+  // Trims stay lazy: forcing each one here would evaluate the CSG tree per
+  // chain. A trim that removes everything simply contributes nothing.
+  try {
+    return make(true) ?? make(false);
+  } catch {
+    try {
+      return make(false);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Distance from a sweep end within which its trim planes act. */
+function trimReach(sweep: PlannedSweep, end: 0 | 1): number {
+  const r = end === 0 ? sweep.radiusA : sweep.radiusB;
+  const extend = end === 0 ? sweep.extendA : sweep.extendB;
+  const c = Math.max(-1, Math.min(1, sweep.n1[0] * sweep.n2[0] + sweep.n1[1] * sweep.n2[1] + sweep.n1[2] * sweep.n2[2]));
+  const footprint = r * (Math.tan(Math.acos(c) / 2) + BAND + 1);
+  return extend + 2 * footprint + 1e-3;
+}
+
+function isShortSweep(sweep: PlannedSweep): boolean {
+  const L = Math.hypot(sweep.b[0] - sweep.a[0], sweep.b[1] - sweep.a[1], sweep.b[2] - sweep.a[2]);
+  return L < Math.min(trimReach(sweep, 0), trimReach(sweep, 1));
+}
+
+/** Remove { n·x > c } but only inside the cube of half-size `reach` at `center`. */
+function trimNear(
+  solid: Manifold,
+  n: readonly [number, number, number],
+  c: number,
+  center: readonly [number, number, number],
+  reach: number,
+): Manifold {
+  const instance = requireWasm();
+  const box = instance.Manifold.cube([2 * reach, 2 * reach, 2 * reach], true).translate([
+    center[0],
+    center[1],
+    center[2],
+  ]);
+  const beyond = box.trimByPlane([n[0], n[1], n[2]], c);
+  return solid.subtract(beyond);
 }
 
 function emptyResult(
@@ -1430,17 +986,6 @@ function genusOfCached(cached: CachedMesh): number {
   } catch {
     return -1;
   }
-}
-
-function addUniqueNormal(out: Vec3[], normals: Float32Array, offset: number): void {
-  const x = normals[offset];
-  const y = normals[offset + 1];
-  const z = normals[offset + 2];
-  if (x === 0 && y === 0 && z === 0) return;
-  for (const n of out) {
-    if (n[0] * x + n[1] * y + n[2] * z > 1 - 1e-7) return;
-  }
-  out.push([x, y, z]);
 }
 
 export { KERNEL_NAME };

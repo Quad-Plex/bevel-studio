@@ -135,6 +135,17 @@ export function repairMesh(input: MeshData): RepairResult {
     topology = buildTopology(mesh);
   }
 
+  // R8 — flip away cap slivers: a vertex lying within 0.05 mm of the opposite
+  // edge's interior (a T-junction or a 1 µm step between two caps). Such a
+  // triangle has no short edge for R1b to collapse, and its normal is noise,
+  // so it shows up as a fake 90° sharp edge across a flat face.
+  const flips = flipCapSlivers(mesh);
+  if (flips.flipped > 0) {
+    mesh = flips.mesh;
+    stats.sliverTriangles += flips.flipped;
+    topology = buildTopology(mesh);
+  }
+
   // Final compaction: R7 can leave vertices unused, and R5/R6 only append
   // vertices that are in use. Rebuild topology only if ids actually changed.
   const finalCompact = compactVertices(mesh);
@@ -331,6 +342,114 @@ function collapseSlivers(mesh: MeshData): {
     mergedVertices: vertexCount - collapsed.positions.length / 3,
     removedTriangles: triCount - collapsed.indices.length / 3,
   };
+}
+
+// ---------------------------------------------------------------------------
+// R8 — cap slivers
+// ---------------------------------------------------------------------------
+
+/**
+ * Edge-flip triangles whose altitude is below SLIVER_ALTITUDE but whose edges
+ * are all long (a "cap": one vertex almost on the opposite edge). The flip
+ * replaces the sliver and its neighbour across the long edge by two triangles
+ * through the near-collinear vertex. It is only taken when both new triangles
+ * are well shaped relative to the neighbour's plane, so feature edges are
+ * kept (as a near-straight two-edge path).
+ */
+function flipCapSlivers(mesh: MeshData): { mesh: MeshData; flipped: number } {
+  const p = mesh.positions;
+  const idx = new Uint32Array(mesh.indices);
+  const triCount = idx.length / 3;
+  const edgeKey = (a: number, b: number) => (a < b ? a * 0x100000000 + b : b * 0x100000000 + a);
+  const owners = new Map<number, number[]>();
+  const addOwner = (t: number) => {
+    for (let k = 0; k < 3; k++) {
+      const key = edgeKey(idx[t * 3 + k], idx[t * 3 + ((k + 1) % 3)]);
+      const list = owners.get(key);
+      if (list) list.push(t);
+      else owners.set(key, [t]);
+    }
+  };
+  const removeOwner = (t: number) => {
+    for (let k = 0; k < 3; k++) {
+      const key = edgeKey(idx[t * 3 + k], idx[t * 3 + ((k + 1) % 3)]);
+      const list = owners.get(key);
+      if (!list) continue;
+      const at = list.indexOf(t);
+      if (at >= 0) list.splice(at, 1);
+      if (list.length === 0) owners.delete(key);
+    }
+  };
+  for (let t = 0; t < triCount; t++) addOwner(t);
+
+  const P = (v: number) => [p[v * 3], p[v * 3 + 1], p[v * 3 + 2]];
+  const normal = (a: number, b: number, c: number) => {
+    const A = P(a);
+    const B = P(b);
+    const C = P(c);
+    const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
+    const w = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    const l = Math.hypot(n[0], n[1], n[2]);
+    return { n: l > 0 ? [n[0] / l, n[1] / l, n[2] / l] : [0, 0, 0], area2: l };
+  };
+  const dist = (a: number, b: number) => {
+    const A = P(a);
+    const B = P(b);
+    return Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2]);
+  };
+
+  let flipped = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (let t = 0; t < triCount; t++) {
+      const v = [idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2]];
+      const lengths = [dist(v[0], v[1]), dist(v[1], v[2]), dist(v[2], v[0])];
+      const longest = Math.max(...lengths);
+      if (!(longest > 0)) continue;
+      const { area2 } = normal(v[0], v[1], v[2]);
+      if (area2 / longest >= SLIVER_ALTITUDE) continue;
+      if (Math.min(...lengths) < SLIVER_EDGE) continue; // R1b's case
+      const k = lengths.indexOf(longest);
+      const u0 = v[k];
+      const v0 = v[(k + 1) % 3];
+      const w = v[(k + 2) % 3];
+      const across = (owners.get(edgeKey(u0, v0)) ?? []).filter((x) => x !== t);
+      if (across.length !== 1) continue;
+      const t2 = across[0];
+      let x = -1;
+      for (let q = 0; q < 3; q++) {
+        const c = idx[t2 * 3 + q];
+        if (c !== u0 && c !== v0) x = c;
+      }
+      if (x < 0 || x === w || owners.has(edgeKey(w, x))) continue;
+      const ref = normal(idx[t2 * 3], idx[t2 * 3 + 1], idx[t2 * 3 + 2]);
+      const a1 = normal(u0, x, w);
+      const a2 = normal(v0, w, x);
+      // the flip may not tilt the neighbour face: it would create a fake crease
+      const cosTilt = Math.cos((2 * Math.PI) / 180);
+      const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      if (dot(a1.n, ref.n) < cosTilt || dot(a2.n, ref.n) < cosTilt) continue;
+      const lx = Math.max(dist(u0, x), dist(x, w), dist(w, u0));
+      const ly = Math.max(dist(v0, w), dist(w, x), dist(x, v0));
+      if (a1.area2 / lx < SLIVER_ALTITUDE || a2.area2 / ly < SLIVER_ALTITUDE) continue;
+
+      removeOwner(t);
+      removeOwner(t2);
+      idx[t * 3] = u0;
+      idx[t * 3 + 1] = x;
+      idx[t * 3 + 2] = w;
+      idx[t2 * 3] = v0;
+      idx[t2 * 3 + 1] = w;
+      idx[t2 * 3 + 2] = x;
+      addOwner(t);
+      addOwner(t2);
+      flipped++;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return flipped > 0 ? { mesh: { positions: p, indices: idx }, flipped } : { mesh, flipped: 0 };
 }
 
 // ---------------------------------------------------------------------------

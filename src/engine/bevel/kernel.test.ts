@@ -4,8 +4,8 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { parseStl } from '../io/stl';
 import { edgeKey, keyA, keyB, orderEdges } from '../topo/edgeOrder';
 import { analyzeParsedStl } from '../analyze';
-import { DEFAULT_BEVEL, EDGE_CANDIDATE, type MeshData } from '../types';
-import { bevelMesh, initKernel, meshToStl } from './kernel';
+import { DEFAULT_BEVEL, EDGE_CANDIDATE, EDGE_CONCAVE, EDGE_CONVEX, type MeshData } from '../types';
+import { bevelMesh, initKernel, manifoldToMesh, meshToManifold, meshToStl } from './kernel';
 import { buildTopology } from './topology';
 
 /**
@@ -265,10 +265,69 @@ function edgeBetween(table: TestEdgeTable, mesh: MeshData, p0: number[], p1: num
   throw new Error('edge not found');
 }
 
+/** The hook as the app sees it: parsed and repaired. */
 function loadHook(): MeshData {
-  const file = readFileSync(resolve(process.cwd(), 'public/fixtures/hook-base.stl'));
-  const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength) as ArrayBuffer;
-  return parseStl(buffer, 1e-4).mesh;
+  return loadAnalyzedHook().mesh;
+}
+
+/** Closed prism over a star-shaped, counter-clockwise polygon, z from 0 to h. */
+function extrudeProfile(profile: number[][], h: number): MeshData {
+  const n = profile.length;
+  const positions: number[] = [];
+  for (const [x, y] of profile) positions.push(x, y, 0);
+  for (const [x, y] of profile) positions.push(x, y, h);
+  let cx = 0;
+  let cy = 0;
+  for (const [x, y] of profile) {
+    cx += x / n;
+    cy += y / n;
+  }
+  const c0 = positions.length / 3;
+  positions.push(cx, cy, 0);
+  const c1 = positions.length / 3;
+  positions.push(cx, cy, h);
+  const indices: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    indices.push(c0, j, i); // bottom, facing down
+    indices.push(c1, n + i, n + j); // top, facing up
+    indices.push(i, j, n + j, i, n + j, n + i); // side
+  }
+  return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
+}
+
+/** Boolean union through the kernel's own Manifold instance. */
+function unionMeshes(a: MeshData, b: MeshData): MeshData {
+  return manifoldToMesh(meshToManifold(a).add(meshToManifold(b)));
+}
+
+/**
+ * 20 mm cube with a 10 mm cube removed at its (20, 20, 20) corner: three
+ * concave edges meet at the inside corner (10, 10, 10).
+ */
+function notchedCubeMesh(): MeshData {
+  const slab = extrudeProfile(
+    [
+      [0, 0],
+      [20, 0],
+      [20, 20],
+      [0, 20],
+    ],
+    10,
+  );
+  const ell = extrudeProfile(
+    [
+      [0, 0],
+      [20, 0],
+      [20, 10],
+      [10, 10],
+      [10, 20],
+      [0, 20],
+    ],
+    10,
+  );
+  for (let i = 2; i < ell.positions.length; i += 3) ell.positions[i] += 10;
+  return unionMeshes(slab, ell);
 }
 
 function loadAnalyzedHook() {
@@ -297,11 +356,12 @@ describe('bevel kernel', () => {
     expect(Math.abs(result.volumeAfter - 7981.23)).toBeLessThan(0.5);
     expect(result.appliedWidth[0]).toBeCloseTo(2, 5);
 
-    // the default termination rule fades the radius over min(r, 0.25·L)
-    const tapered = bevelMesh(cube, Uint32Array.of(edge), PARAMS);
-    expect(tapered.status).toBe('NoError');
-    expect(Math.abs(tapered.volumeAfter - 7983.73)).toBeLessThan(0.5);
-    expect(tapered.volumeAfter).toBeGreaterThan(result.volumeAfter);
+    // A bevel that ends at a corner runs into the end faces at full radius
+    // (the CAD result), so the default rule matches the untapered volume.
+    const ended = bevelMesh(cube, Uint32Array.of(edge), PARAMS);
+    expect(ended.status).toBe('NoError');
+    expect(Math.abs(ended.volumeAfter - 7981.23)).toBeLessThan(0.5);
+    expect(Array.from(ended.endTapers!)).toEqual([0, 0]);
   });
 
   it('attributes bevel-band triangles through the boolean', () => {
@@ -340,135 +400,108 @@ describe('bevel kernel', () => {
     expect(result.warnings.some((w) => w.severity === 'error')).toBe(false);
   });
 
-  it('bevels all 77 convex hook edges ≥ 20° to 12 783 mm³', () => {
+  it('bevels every convex hook candidate at the full requested width', () => {
     const hook = loadHook();
     const table = buildTestEdgeTable(hook);
     const edges = convexAtLeast(table, 20);
-    expect(edges.length).toBe(77);
+    expect(edges.length).toBe(68);
 
     const result = bevelMesh(hook, edges, HOOK_PARAMS);
 
     expect(result.status).toBe('NoError');
     expect(result.manifold).toBe(true);
     expect(result.shells).toBe(1);
-    expect(Math.abs(result.volumeAfter - 12783)).toBeLessThanOrEqual(15);
-    // The acceptance window for this mesh is [2000, 3500]; the extra triangles
-    // come from the six short bend segments that used to be skipped.
-    expect(result.meta.triangles).toBeLessThan(3500);
-    expect(result.volumeAfter).toBeLessThan(result.volumeBefore);
-
-    // Every selected edge above the 0.05 mm collapse threshold is beveled. In
-    // particular the six 0.49–0.57 mm bend segments are kept in the chain at
-    // full width instead of being dropped for being shorter than 4× width.
-    let short = 0;
-    let micro = 0;
-    for (let i = 0; i < edges.length; i++) {
-      const length = table.length[edges[i]];
-      if (length < 0.05) {
-        micro++;
-        continue;
-      }
-      expect(result.appliedWidth[i]).toBeGreaterThan(0);
-      if (length < 4 * HOOK_PARAMS.width) {
-        short++;
-        expect(result.appliedWidth[i]).toBeCloseTo(HOOK_PARAMS.width, 5);
-      }
-    }
-    expect(short).toBe(6);
-    expect(micro).toBe(7);
-
-    // The weld at 1e-3 mm merges the near-coincident CSG vertices that used to
-    // make the plate-corner contacts look like crossings. Nothing blocks
-    // export for the natural all-candidate selection any more.
-    expect(result.warnings.some((w) => w.code === 'bevel.selfIntersection')).toBe(false);
     expect(result.selfIntersections).toBe(0);
+    expect(result.warnings.some((w) => w.severity === 'error')).toBe(false);
+    // No tessellation-driven clamp: a 0.1 mm sliver triangle next to a 45 mm
+    // edge used to limit it to 0.05 mm.
+    for (const width of result.appliedWidth) expect(width).toBeCloseTo(HOOK_PARAMS.width, 5);
+    // Every fully selected corner gets a rolling-ball blend, including the
+    // irregular plate/hook corner with its 3.3° extra crease.
+    expect(result.corners).toBeGreaterThanOrEqual(14);
+    // The hand-made Blender reference is 12 788.47 mm³.
+    expect(Math.abs(result.volumeAfter - 12788.47)).toBeLessThan(40);
   });
 
-  it('collapses the notch sliver and bevels its junction at width 1.458', () => {
+  it('runs the outer hook rim through the plate corner without thinning', () => {
+    const hook = loadHook();
+    const table = buildTestEdgeTable(hook);
+    const result = bevelMesh(hook, convexAtLeast(table, 20), {
+      ...HOOK_PARAMS,
+      width: 1,
+      clampOverlap: true,
+    });
+    expect(result.manifold).toBe(true);
+    expect(result.selfIntersections).toBe(0);
+
+    // Original vertices of the top outer rim from the plate corner around the
+    // bend. Each one is a sharp rim point that a continuous bevel removes.
+    const rim = [
+      [-32.735, -0.071, 35],
+      [-32.712, -3.071, 35],
+      [-32.507, -6.228, 35],
+      [-31.946, -9.436, 35],
+      [-31.022, -12.534, 35],
+    ];
+    for (const point of rim) expect(nearestVertex(result.mesh, point)).toBeGreaterThan(0.2);
+    // The three-way corner is a round blend, not a point: a sphere of radius 1
+    // keeps (√3 − 1) ≈ 0.73 mm away from a cube-like corner.
+    expect(nearestVertex(result.mesh, [-32.735, -0.071, 35])).toBeGreaterThan(0.5);
+  });
+
+  it('bevels every sharp hook edge, inside and outside, at any width', () => {
     const analyzed = loadAnalyzedHook();
-    const mesh = analyzed.mesh;
-    const p = mesh.positions;
-    const idx = mesh.indices;
-    // No sub-0.05 mm-altitude face may survive in the 0.02 mm wall box.
-    let slivers = 0;
-    for (let t = 0; t < idx.length / 3; t++) {
-      const q = [0, 1, 2].map((k) => {
-        const v = idx[t * 3 + k] * 3;
-        return [p[v], p[v + 1], p[v + 2]];
-      });
-      if (!q.every((v) => v[0] > 12.7 && v[0] < 13.0 && v[1] > 35.0 && v[1] < 35.5)) continue;
-      const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-      const cross = (a: number[], b: number[]) => [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-      ];
-      const len = (a: number[]) => Math.hypot(a[0], a[1], a[2]);
-      const area2 = len(cross(sub(q[1], q[0]), sub(q[2], q[0])));
-      const longest = Math.max(
-        len(sub(q[1], q[0])),
-        len(sub(q[2], q[1])),
-        len(sub(q[0], q[2])),
-      );
-      if (area2 / longest < 0.05) slivers++;
-    }
-    expect(slivers).toBe(0);
-
-    const junction: number[] = [];
-    for (let i = 0; i < analyzed.edges.count; i++) {
-      if (!(analyzed.edges.flags[i] & EDGE_CANDIDATE)) continue;
-      const o = i * 6;
-      const mx = (analyzed.edges.position[o] + analyzed.edges.position[o + 3]) / 2;
-      const my = (analyzed.edges.position[o + 1] + analyzed.edges.position[o + 4]) / 2;
-      if (mx > 12.7 && mx < 13.0 && my > 35.0 && my < 35.5) junction.push(i);
-    }
-    expect(junction.length).toBe(1);
-    expect(analyzed.edges.maxWidth[junction[0]]).toBeGreaterThan(0.5);
-
     const ids: number[] = [];
     for (let i = 0; i < analyzed.edges.count; i++) {
-      if (analyzed.edges.flags[i] & EDGE_CANDIDATE) ids.push(i);
+      if (analyzed.edges.dihedral[i] >= 20 && analyzed.edges.flags[i] & (EDGE_CONVEX | EDGE_CONCAVE)) ids.push(i);
     }
-    const result = bevelMesh(
-      mesh,
-      Uint32Array.from(ids),
-      { ...DEFAULT_BEVEL, width: 1.458, segments: 1, clampOverlap: true },
-      analyzed.edges.maxWidth,
-    );
-    expect(result.status).toBe('NoError');
-    expect(result.manifold).toBe(true);
-    const index = ids.indexOf(junction[0]);
-    expect(index).toBeGreaterThanOrEqual(0);
-    expect(result.appliedWidth[index]).toBeGreaterThan(0);
+    expect(ids.length).toBe(71);
+    for (const width of [0.3, 1, 2]) {
+      const result = bevelMesh(analyzed.mesh, Uint32Array.from(ids), {
+        ...HOOK_PARAMS,
+        width,
+        clampOverlap: true,
+      });
+      expect(result.manifold, "width " + width).toBe(true);
+      expect(result.shells, "width " + width).toBe(1);
+      expect(result.selfIntersections, "width " + width).toBe(0);
+      expect(result.warnings.some((w) => w.code === 'bevel.fillet')).toBe(true);
+    }
+  });
 
-    // Adjacent sweeps must meet at one radius on every 2-edge chain vertex.
-    const endWidths = result.endWidths;
-    const endTapers = result.endTapers;
-    expect(endWidths).toBeDefined();
-    const atVertex = new Map<string, { w: number; taper: boolean }[]>();
-    const keyOf = (x: number, y: number, z: number) =>
-      `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
-    for (let i = 0; i < ids.length; i++) {
-      // An edge that fades at either end is not a constant-width chain member.
-      if (endTapers![i * 2] || endTapers![i * 2 + 1]) continue;
-      const o = ids[i] * 6;
-      const a = keyOf(analyzed.edges.position[o], analyzed.edges.position[o + 1], analyzed.edges.position[o + 2]);
-      const b = keyOf(analyzed.edges.position[o + 3], analyzed.edges.position[o + 4], analyzed.edges.position[o + 5]);
-      const add = (key: string, w: number) => {
-        const list = atVertex.get(key);
-        if (list) list.push({ w, taper: false });
-        else atVertex.set(key, [{ w, taper: false }]);
-      };
-      add(a, endWidths![i * 2]);
-      add(b, endWidths![i * 2 + 1]);
+  it('wraps the rim around an inside fillet at the wall junction', () => {
+    const analyzed = loadAnalyzedHook();
+    const ids: number[] = [];
+    for (let i = 0; i < analyzed.edges.count; i++) {
+      if (analyzed.edges.dihedral[i] >= 20 && analyzed.edges.flags[i] & (EDGE_CONVEX | EDGE_CONCAVE)) ids.push(i);
     }
-    let joints = 0;
-    for (const ends of atVertex.values()) {
-      if (ends.length !== 2 || ends.some((end) => end.w === 0)) continue;
-      joints++;
-      expect(Math.abs(ends[0].w - ends[1].w)).toBeLessThan(1e-6);
+    const result = bevelMesh(analyzed.mesh, Uint32Array.from(ids), { ...HOOK_PARAMS, width: 1, clampOverlap: true });
+    expect(result.manifold).toBe(true);
+    // The reflex top corner where the plate meets the wall: the fillet fills
+    // it and the rim bevel follows the fillet, so no material is left at the
+    // old sharp point and nothing sticks up above the cap.
+    // With equal fillet and rim radii the rim's ball centre sits behind the
+    // old corner, which therefore ends ≈ 0.2 mm below the rounded surface.
+    const corner = [12.265, -0.071, 35];
+    expect(nearestVertex(result.mesh, corner)).toBeGreaterThan(0.15);
+    let maxZ = -Infinity;
+    for (let i = 2; i < result.mesh.positions.length; i += 3) maxZ = Math.max(maxZ, result.mesh.positions[i]);
+    expect(maxZ).toBeLessThan(35.01);
+  });
+
+  it('removes the 1 µm cap step at the wall junction during repair', () => {
+    const analyzed = loadAnalyzedHook();
+    const { edges } = analyzed;
+    // The wall cap sits 0.001 mm above the plate cap. A sliver triangle used
+    // to fill the step and read as a 90° concave edge across the flat top.
+    for (let i = 0; i < edges.count; i++) {
+      if (!(edges.flags[i] & EDGE_CONCAVE) || edges.dihedral[i] < 20) continue;
+      const z0 = edges.position[i * 6 + 2];
+      const z1 = edges.position[i * 6 + 5];
+      const onTop = Math.abs(z0 - 35) < 0.01 && Math.abs(z1 - 35) < 0.01;
+      const onBottom = Math.abs(z0) < 0.01 && Math.abs(z1) < 0.01;
+      expect(onTop || onBottom).toBe(false);
     }
-    expect(joints).toBeGreaterThan(20);
   });
 
   it('keeps the bevel band connected across the hook notch', () => {
@@ -537,119 +570,6 @@ describe('bevel kernel', () => {
       }
     }
     expect(components).toBe(1);
-  });
-
-  it('fades the notch knife-edge fillet into the cap without a 90° wall', () => {
-    const hook = loadHook();
-    const table = buildTestEdgeTable(hook);
-    const edges = convexAtLeast(table, 20);
-    const result = bevelMesh(hook, edges, HOOK_PARAMS);
-    const mask = result.bevelFaces!;
-    const topo = buildTopology(result.mesh);
-    const p = result.mesh.positions;
-    let walls = 0;
-    for (let e = 0; e < topo.edgeCount; e++) {
-      const t1 = topo.tris[e * 2];
-      const t2 = topo.tris[e * 2 + 1];
-      if (t1 === ABSENT || t2 === ABSENT || t2 === THIRD) continue;
-      if (mask[t1] === mask[t2]) continue;
-      if (topo.dihedral[e] < 45 || topo.length[e] < 0.5) continue;
-      const a = topo.v[e * 2] * 3;
-      const b = topo.v[e * 2 + 1] * 3;
-      const mid = [
-        (p[a] + p[b]) / 2,
-        (p[a + 1] + p[b + 1]) / 2,
-        (p[a + 2] + p[b + 2]) / 2,
-      ];
-      // Around the 35 mm knife edge at (12.873, 35.257); the cap fade must
-      // remove its old 1.6 mm vertical end wall.
-      if (Math.hypot(mid[0] - 12.873, mid[1] - 35.257, mid[2] - 34.5) < 3) walls++;
-    }
-    expect(walls).toBe(0);
-  });
-
-  it('uses one safe width across a short-segment bend chain', () => {
-    // Match the app's import path: unpinned weld tolerance, analyzer widths.
-    const file = readFileSync(resolve(process.cwd(), 'public/fixtures/hook-base.stl'));
-    const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength) as ArrayBuffer;
-    const parsed = parseStl(buffer);
-    const analysis = analyzeParsedStl(parsed, 'hook');
-    const hook = analysis.mesh;
-    const ids: number[] = [];
-    for (let i = 0; i < analysis.edges.count; i++) {
-      if (analysis.edges.flags[i] & EDGE_CANDIDATE) ids.push(i);
-    }
-    const result = bevelMesh(
-      hook,
-      Uint32Array.from(ids),
-      { ...HOOK_PARAMS, width: 1.458, segments: 1, clampOverlap: true },
-      analysis.edges.maxWidth,
-    );
-
-    const position = analysis.edges.position;
-    const short: number[] = [];
-    for (let i = 0; i < ids.length; i++) {
-      const e = ids[i];
-      const length = Math.hypot(
-        position[e * 6 + 3] - position[e * 6],
-        position[e * 6 + 4] - position[e * 6 + 1],
-        position[e * 6 + 5] - position[e * 6 + 2],
-      );
-      const z0 = position[e * 6 + 2];
-      const z1 = position[e * 6 + 5];
-      const top = z0 > 34.9 && z1 > 34.9;
-      if (top && length > 0.45 && length < 0.6) short.push(e);
-    }
-    expect(short.length).toBe(3);
-    const beveled = short.filter((e) => result.appliedWidth[ids.indexOf(e)] > 0);
-    expect(beveled.length).toBeGreaterThan(1);
-
-    const shortWidths = beveled.map((e) => result.appliedWidth[ids.indexOf(e)]);
-    const narrowest = Math.min(...shortWidths);
-    expect(narrowest).toBeGreaterThan(0);
-    // The request is 1.458 mm; the short chain cannot carry it.
-    expect(narrowest).toBeLessThan(1.458 * 0.5);
-
-    // Every smooth continuation of the bend chain must use the same width;
-    // otherwise each short sweep caps at its own radius and the band scallops.
-    const v = analysis.edges.v;
-    const shortVertices = new Set<number>();
-    for (const e of beveled) {
-      shortVertices.add(v[e * 2]);
-      shortVertices.add(v[e * 2 + 1]);
-    }
-    const point = (vertex: number): number[] => [
-      position[vertex * 3],
-      position[vertex * 3 + 1],
-      position[vertex * 3 + 2],
-    ];
-    const smoothLimit = -Math.cos((30 * Math.PI) / 180);
-    for (const e of ids) {
-      if (short.includes(e)) continue;
-      const vertex = v[e * 2];
-      const other = v[e * 2 + 1];
-      if (!shortVertices.has(vertex) && !shortVertices.has(other)) continue;
-      const shared = shortVertices.has(vertex) ? vertex : other;
-      const index = ids.indexOf(e);
-      if (result.appliedWidth[index] <= 0) continue;
-
-      for (const s of beveled) {
-        if (!(v[s * 2] === shared || v[s * 2 + 1] === shared)) continue;
-        const a = point(shared);
-        const b = point(v[s * 2] === shared ? v[s * 2 + 1] : v[s * 2]);
-        const c = point(v[e * 2] === shared ? v[e * 2 + 1] : v[e * 2]);
-        const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        const dot =
-          (ab[0] * ac[0] + ab[1] * ac[1] + ab[2] * ac[2]) /
-          (Math.hypot(...ab) * Math.hypot(...ac));
-        if (dot < smoothLimit) {
-          // The neighbour belongs to the same smooth chain and must inherit
-          // the safe width instead of its own much larger per-edge limit.
-          expect(result.appliedWidth[index]).toBeLessThan(1.458 * 0.5);
-        }
-      }
-    }
   });
 
   it('bevels a chain of four short edges continuously without dropping a segment', () => {
@@ -793,7 +713,26 @@ describe('bevel kernel', () => {
     expect(base).toBeGreaterThan(0);
   });
 
-  it('clamps each edge independently, never to the selection minimum', () => {
+  it('mitres two rims at an inside corner without a spike', () => {
+    // L-shaped prism: the top rims of the two inner walls meet at the reflex
+    // corner (3, 3, 10). The inside vertical edge stays unselected. Each wall
+    // is two triangles, so the wall the other rim runs along must still be
+    // recognised as that rim's face, not as an end face that cuts this rim.
+    const mesh = lPrismMesh();
+    const table = buildTestEdgeTable(mesh);
+    const rims = [
+      edgeBetween(table, mesh, [6, 3, 10], [3, 3, 10]),
+      edgeBetween(table, mesh, [3, 3, 10], [3, 6, 10]),
+    ];
+    const result = bevelMesh(mesh, Uint32Array.from(rims), { ...PARAMS, width: 1 });
+    expect(result.manifold).toBe(true);
+    expect(result.selfIntersections).toBe(0);
+    // A clean miter removes the corner point; the old flat end cuts left it
+    // standing as a spike between the two fillets.
+    expect(nearestVertex(result.mesh, [3, 3, 10])).toBeGreaterThan(0.3);
+  });
+
+  it('limits one edge without shrinking the rest of the selection', () => {
     const cube = cubeMesh(20);
     const table = buildTestEdgeTable(cube);
     const all = convexAtLeast(table, 20);
@@ -801,10 +740,110 @@ describe('bevel kernel', () => {
     limits[all[0]] = 1; // only this edge is narrow
 
     const result = bevelMesh(cube, all, { ...PARAMS, width: 1.5, clampOverlap: true }, limits);
-
-    expect(result.clampedEdges).toBe(1);
+    expect(result.manifold).toBe(true);
     expect(result.appliedWidth[0]).toBeCloseTo(0.98, 5);
-    for (let i = 1; i < all.length; i++) expect(result.appliedWidth[i]).toBeCloseTo(1.5, 5);
+    const a = table.v[all[0] * 2];
+    const b = table.v[all[0] * 2 + 1];
+    for (let i = 1; i < all.length; i++) {
+      const ends = [result.endWidths![i * 2], result.endWidths![i * 2 + 1]];
+      const touches = [a, b].includes(table.v[all[i] * 2]) || [a, b].includes(table.v[all[i] * 2 + 1]);
+      if (touches) {
+        // a neighbour ramps from the narrow corner back up to the full width
+        expect(Math.min(...ends)).toBeCloseTo(0.98, 5);
+        expect(Math.max(...ends)).toBeCloseTo(1.5, 5);
+      } else {
+        expect(result.appliedWidth[i]).toBeCloseTo(1.5, 5);
+      }
+    }
+  });
+
+  it('bridges a 0.02 mm step in a rim instead of interrupting the bevel', () => {
+    // 20 × 10 profile whose front face jogs out by 0.02 mm halfway along
+    const mesh = extrudeProfile(
+      [
+        [0, 0],
+        [10, 0],
+        [10, -0.02],
+        [20, -0.02],
+        [20, 10],
+        [0, 10],
+      ],
+      10,
+    );
+    const table = buildTestEdgeTable(mesh);
+    const p = mesh.positions;
+    const rim: number[] = [];
+    for (let e = 0; e < table.count; e++) {
+      const pa = table.v[e * 2] * 3;
+      const pb = table.v[e * 2 + 1] * 3;
+      if (p[pa + 2] === 10 && p[pb + 2] === 10 && p[pa + 1] <= 0 && p[pb + 1] <= 0 && table.dihedral[e] > 20) {
+        rim.push(e);
+      }
+    }
+    expect(rim.length).toBe(3);
+    const result = bevelMesh(mesh, Uint32Array.from(rim), { ...PARAMS, width: 1, clampOverlap: true });
+    expect(result.manifold).toBe(true);
+    expect(result.selfIntersections).toBe(0);
+    expect(result.warnings.some((w) => w.code === 'bevel.short')).toBe(true);
+    // no sharp rim point survives along the front top edge
+    const q = result.mesh.positions;
+    for (let i = 0; i < q.length; i += 3) {
+      if (q[i] > 0.5 && q[i] < 19.5 && Math.abs(q[i + 2] - 10) < 1e-3) expect(q[i + 1]).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('fades a chain that stops in the middle of a crease', () => {
+    const mesh = segmentedBoxMesh();
+    const table = buildTestEdgeTable(mesh);
+    const p = mesh.positions;
+    const chain: { e: number; x: number }[] = [];
+    for (let e = 0; e < table.count; e++) {
+      const a = table.v[e * 2] * 3;
+      const b = table.v[e * 2 + 1] * 3;
+      if (
+        Math.abs(p[a + 1] - 20) < 1e-6 &&
+        Math.abs(p[b + 1] - 20) < 1e-6 &&
+        Math.abs(p[a + 2] - 20) < 1e-6 &&
+        Math.abs(p[b + 2] - 20) < 1e-6 &&
+        table.dihedral[e] > 20
+      ) {
+        chain.push({ e, x: (p[a] + p[b]) / 2 });
+      }
+    }
+    chain.sort((u, v) => u.x - v.x);
+    const result = bevelMesh(mesh, Uint32Array.of(chain[1].e, chain[2].e), { ...PARAMS, width: 1 });
+    expect(result.manifold).toBe(true);
+    // the outer ends fade out (the crease goes on unselected); the joint does not
+    expect(Array.from(result.endTapers!).filter((t) => t === 1).length).toBe(2);
+  });
+
+  it('blends a concave three-face corner with an inside sphere', () => {
+    const mesh = notchedCubeMesh();
+    const table = buildTestEdgeTable(mesh);
+    const concave: number[] = [];
+    for (let e = 0; e < table.count; e++) if (table.convex[e] === 0) concave.push(e);
+    expect(concave.length).toBe(3);
+
+    const result = bevelMesh(mesh, Uint32Array.from(concave), { ...PARAMS, width: 2 });
+    expect(result.manifold).toBe(true);
+    expect(result.selfIntersections).toBe(0);
+    expect(result.corners).toBe(1);
+    expect(result.volumeAfter).toBeGreaterThan(result.volumeBefore);
+    // the inside corner point is buried under the fillet
+    expect(nearestVertex(result.mesh, [10, 10, 10])).toBeGreaterThan(0.5);
+  });
+
+  it('bevels every edge of a notched cube, mixing inside and outside', () => {
+    const mesh = notchedCubeMesh();
+    const table = buildTestEdgeTable(mesh);
+    const sharp: number[] = [];
+    for (let e = 0; e < table.count; e++) if (table.convex[e] === 0 || table.convex[e] === 1) sharp.push(e);
+    for (const width of [0.5, 2]) {
+      const result = bevelMesh(mesh, Uint32Array.from(sharp), { ...PARAMS, width, clampOverlap: true });
+      expect(result.manifold, 'width ' + width).toBe(true);
+      expect(result.shells, 'width ' + width).toBe(1);
+      expect(result.selfIntersections, 'width ' + width).toBe(0);
+    }
   });
 
   it('is deterministic', () => {

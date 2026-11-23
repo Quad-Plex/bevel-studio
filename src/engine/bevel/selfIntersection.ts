@@ -5,7 +5,10 @@ import type { MeshData } from '../types';
  * topologically manifold (Manifold.status() === "NoError") and still have
  * triangles passing through each other, so this is a separate release gate.
  */
-export function countSelfIntersections(mesh: MeshData): number {
+export function countSelfIntersections(
+  mesh: MeshData,
+  onHit?: (a: number, b: number) => void,
+): number {
   const { positions: p, indices: idx } = mesh;
   const T = idx.length / 3;
   const c = new Float64Array(T * 9);
@@ -41,7 +44,10 @@ export function countSelfIntersections(mesh: MeshData): number {
         box[i * 6 + 2] > box[j * 6 + 5] + eps || box[j * 6 + 2] > box[i * 6 + 5] + eps
       ) continue;
       if (sharesVertex(idx, i, j)) continue;
-      if (trianglesIntersect(c, i, j)) hits++;
+      if (trianglesIntersect(c, i, j)) {
+        hits++;
+        onHit?.(i, j);
+      }
     }
   }
   return hits;

@@ -37,12 +37,29 @@ inside the worker and cannot be preempted. Preview and export both call the
 same `bevelMesh` with the app's parameters; export additionally serialises the
 result to binary STL.
 
-`bevelMesh` builds one sweep per selected edge — subtractive for convex edges,
-additive for concave fillets — joins chains with mitred overlaps and
-rolling-ball corner solids, unions the parts with a Manifold WASM boolean,
-validates the result and returns the closest mesh with a `bevel.nonManifold`
-warning when the watertight check fails. The Inspector blocks export while that
-warning is present.
+`bevelMesh` runs in three steps:
+
+1. **Plan** (`bevel/plan.ts`, no WASM). Vertices joined by sharp edges shorter
+   than the irregularity scale (0.2 × width, at most 0.1 mm) become one node,
+   so a sliver step reads as a single corner. Each selected edge gets a
+   geometric width limit from short BVH ray casts along its faces
+   (`bevel/bvh.ts`); node widths are the minimum of their edges and ramp along
+   the selection graph. Every sweep end is either *joined* (it runs past the
+   node and is trimmed by the miter plane against each other selected edge
+   there, and by the planes of other features' faces) or *faded* (the
+   selected run stops in the middle of a crease). Nodes whose features are all
+   selected and of one kind get a rolling-ball vertex blend; an inside fillet
+   between two beveled rims gets a rim chain along its arc.
+2. **Build** (`bevel/sweep.ts`). Linked sweeps become one seamless chain solid
+   with mitred rings; each section carries a band past the face planes that
+   sweeps away irregularities and keeps the boolean off coplanar faces.
+   Vertex blends are `region − (K ⊕ ball)` with the convex polytopes built by
+   plane enumeration and hulls. Trims only act near their own end.
+3. **Boolean** (`bevel/kernel.ts`). Inside fillets are unioned with the base,
+   outside cuts are unioned and subtracted. The result is cleaned, welded and
+   validated; when it is not watertight or has crossing triangles the kernel
+   retries once with a 1e-4 mm arc inset and keeps the better result. A result
+   that still fails is reported, and the Inspector blocks export.
 
 ## Invariants
 
@@ -54,8 +71,9 @@ warning is present.
   exported.
 - **Transfers are copies.** Buffers handed to `postMessage` are copies, never
   the worker's only copy.
-- **Bounded UI work.** No O(n) pass over the full mesh per frame; selection and
-  picking are the known exceptions (see README).
+- **Bounded UI work.** No O(n) pass over the full mesh per frame. The brush
+  projects only feature edges and tests occlusion against a BVH of the source
+  mesh, built once on the first hover.
 
 ## Module map
 
@@ -64,10 +82,10 @@ warning is present.
 | `src/engine/io/stl.ts` | Parse, weld, STL serialisation |
 | `src/engine/repair/` | Mesh repair pipeline |
 | `src/engine/topo/` | Canonical edges, union-find, metadata |
-| `src/engine/bevel/` | Cut solids, Manifold boolean, validation |
+| `src/engine/bevel/` | Plan (`plan.ts`), sweeps and blends (`sweep.ts`), BVH (`bvh.ts`), boolean and validation (`kernel.ts`) |
 | `src/engine/worker.ts` | Session state, job serialisation, epoch checks |
 | `src/engine/client.ts` | Main-thread façade, coalescing, timeouts, errors |
-| `src/viewport/` | three.js scene, edge overlay, picking, gestures |
+| `src/viewport/` | three.js scene, edge overlay, selection brush (`brush.ts`, `surface.ts`, `useEdgeSelection.ts`) |
 | `src/state/` | zustand store, live preview, export |
 | `src/panels/`, `src/ui/` | Inspector, status bar, glass component kit |
 

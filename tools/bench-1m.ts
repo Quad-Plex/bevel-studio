@@ -131,7 +131,6 @@ const bevel = bevelMesh(
   analyzed.mesh,
   Uint32Array.from(ids),
   { ...DEFAULT_BEVEL, width: bevelWidth, segments: 3, clampOverlap: true },
-  analyzed.edges.maxWidth,
 );
 const bevelMs = performance.now() - started;
 
@@ -143,6 +142,8 @@ console.log(`  repair + edges   ${analyzeMs.toFixed(0)} ms   ${analyzed.edges.co
 console.log(`  watertight       ${analyzed.meta.watertight}, ${analyzed.meta.shells} shell(s), genus ${analyzed.meta.genus}`);
 console.log(`  bevel ${String(ids.length).padStart(4)} edges  ${bevelMs.toFixed(0)} ms   ${bevel.mesh.indices.length / 3} tris, status ${bevel.status}`);
 console.log(
+  `  bevel phases    build ${bevel.timings.buildMs.toFixed(0)} ms, boolean ${bevel.timings.booleanMs.toFixed(0)} ms, total ${bevel.timings.totalMs.toFixed(0)} ms
+` +
   `  bevel detail    clamped ${bevel.clampedEdges}, volume ${bevel.volumeBefore.toFixed(1)} → ${bevel.volumeAfter.toFixed(1)} mm³, warnings [${bevel.warnings.map((w) => w.code).join(', ')}]`,
 );
 console.log(`  heap             ${mb(heapEnd)} (Δ ${mb(heapEnd - heapStart)})`);

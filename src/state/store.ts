@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import {
   DEFAULT_BEVEL,
   EDGE_CANDIDATE,
+  EDGE_CONCAVE,
+  EDGE_CONVEX,
   type BevelParams,
   type EdgeTable,
   type MeshData,
@@ -10,6 +12,20 @@ import {
 } from '../engine/types';
 
 export type Phase = 'idle' | 'importing' | 'ready' | 'beveling' | 'error';
+
+/** Which feature edges the selection brush and bulk selection act on. */
+export type EdgeKind = 'all' | 'outside' | 'inside';
+
+export interface BrushSettings {
+  /** brush radius in CSS pixels */
+  radius: number;
+  filter: EdgeKind;
+}
+
+export const BRUSH_MIN = 4;
+export const BRUSH_MAX = 80;
+/** Bulk selection uses the same feature threshold as the auto candidates. */
+const SHARP_DEG = 20;
 
 export interface PreviewState {
   mesh: MeshData;
@@ -37,6 +53,7 @@ export interface AppStore {
   preview: PreviewState | null;
   showPreview: boolean;
   showWireframe: boolean;
+  brush: BrushSettings;
   progress: { stage: string; value: number } | null;
   error: string | null;
 
@@ -56,6 +73,9 @@ export interface AppStore {
   toggleEdges(ids: Iterable<number>, on: boolean): void;
   setSelection(mask: Uint8Array): void;
   selectCandidates(on: boolean): void;
+  /** Select or clear every sharp (≥ 20°) edge of one kind. */
+  selectSharp(kind: EdgeKind, on: boolean): void;
+  setBrush(patch: Partial<BrushSettings>): void;
   clearSelection(): void;
   setParams(patch: Partial<BevelParams>): void;
   setPreview(preview: PreviewState | null): void;
@@ -79,6 +99,7 @@ export const useApp = create<AppStore>((set, get) => ({
   preview: null,
   showPreview: true,
   showWireframe: false,
+  brush: { radius: 14, filter: 'all' },
   progress: null,
   error: null,
 
@@ -148,6 +169,22 @@ export const useApp = create<AppStore>((set, get) => ({
     }
     set({ selected: next });
   },
+  selectSharp: (kind, on) => {
+    const { edges, selected } = get();
+    if (!edges || !selected) return;
+    const mask = kind === 'outside' ? EDGE_CONVEX : kind === 'inside' ? EDGE_CONCAVE : EDGE_CONVEX | EDGE_CONCAVE;
+    const next = selected.slice();
+    for (let i = 0; i < edges.count; i++) {
+      if (edges.flags[i] & mask && edges.dihedral[i] >= SHARP_DEG) next[i] = on ? 1 : 0;
+    }
+    set({ selected: next });
+  },
+  setBrush: (patch) =>
+    set((s) => {
+      const next = { ...s.brush, ...patch };
+      next.radius = Math.max(BRUSH_MIN, Math.min(BRUSH_MAX, Math.round(next.radius)));
+      return { brush: next };
+    }),
   clearSelection: () => {
     const { selected } = get();
     if (selected) set({ selected: new Uint8Array(selected.length) });

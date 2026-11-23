@@ -19,6 +19,7 @@ import '../app/app.css';
  */
 export function Viewport() {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const brushRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<SceneController | null>(null);
   const dragDepth = useRef(0);
   const fittedMesh = useRef<MeshData | null>(null);
@@ -42,7 +43,7 @@ export function Viewport() {
   const storeError = useApp((state) => state.error);
 
   const importer = useStlImport();
-  const selection = useEdgeSelection(hostRef);
+  const selection = useEdgeSelection(hostRef, brushRef);
 
   // Dev affordance for automated screenshots: /?sample=1 loads the fixture.
   const autoSample = useRef(false);
@@ -248,7 +249,13 @@ export function Viewport() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <div ref={hostRef} className="vp-stage" onDoubleClick={onStageDoubleClick} {...selection} />
+      <div
+        ref={hostRef}
+        className={`vp-stage${edges ? ' has-brush' : ''}`}
+        onDoubleClick={onStageDoubleClick}
+        {...selection}
+      />
+      <div ref={brushRef} className="vp-brush" aria-hidden="true" />
 
       {glError ? (
         <div className="vp-center">

@@ -138,7 +138,10 @@ export class SceneController {
       RIGHT: null as unknown as MOUSE,
     };
 
-    this.edgeView = new EdgeView(this.invalidate, readColorToken('--selection', '#ffb65c'));
+    this.edgeView = new EdgeView(this.invalidate, readColorToken('--selection', '#ffb65c'), {
+      add: readColorToken('--accent', '#7de2c3'),
+      remove: readColorToken('--danger', '#ff6b6b'),
+    });
     this.meshView = new MeshView({
       bevelColor: readColorToken('--bevel-face', '#b18cff'),
     });

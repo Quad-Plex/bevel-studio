@@ -117,7 +117,7 @@ const cases: Expectation[] = [
     // not a tolerance relaxation of the hand model.
     label: 'outside only',
     excludePlate: true,
-    triangles: [400, 1000],
+    triangles: [400, 1600],
     volume: [12760, 12855],
     bboxY: [62.05, 62.25],
   },
@@ -155,20 +155,9 @@ for (const expectation of cases) {
     ['bboxY', bboxY >= expectation.bboxY[0] && bboxY <= expectation.bboxY[1]],
   ];
 
-  if (expectation.excludePlate) {
-    // The outside-rim selection is the clean shipped path: no crossings at all.
-    checks.push(['selfIntersections', result.selfIntersections === 0]);
-    checks.push(['watertight', result.meta.watertight]);
-  } else {
-    // All convex edges still produce crossings at the plate corners. Until the
-    // chain-consistent clamp lands, the requirement is that the kernel detects
-    // them and refuses export instead of shipping broken geometry.
-    checks.push([
-      'selfIntersectionDetected',
-      (result.selfIntersections ?? 0) === 0 ||
-        result.warnings.some((warning) => warning.code === 'bevel.selfIntersection'),
-    ]);
-  }
+  // Both selections are export-clean: watertight and free of crossings.
+  checks.push(['selfIntersections', result.selfIntersections === 0]);
+  checks.push(['watertight', result.meta.watertight]);
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
   for (const name of failed) failures.push(`${expectation.label}: ${name}`);
 

@@ -52,6 +52,60 @@
   cursor: grabbing;
 }
 
+/* Selection brush: the stage shows a precise crosshair, the ring shows reach. */
+.vp-stage.has-brush,
+.vp-stage.has-brush:active {
+  cursor: crosshair;
+}
+
+.vp-brush {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  box-sizing: border-box;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  transition:
+    opacity 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+  will-change: transform;
+}
+
+.vp-brush.is-visible {
+  opacity: 0.85;
+}
+
+.vp-brush.has-hits {
+  opacity: 1;
+  border-width: 2px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.vp-brush[data-mode='remove'] {
+  border-color: color-mix(in srgb, var(--danger) 75%, transparent);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+
+.vp-brush[data-mode='remove'].has-hits {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.vp-brush.is-active {
+  border-style: dashed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vp-brush {
+    transition: none;
+  }
+}
+
 .vp-canvas {
   position: absolute;
   inset: 0;

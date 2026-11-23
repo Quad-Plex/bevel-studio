@@ -1,16 +1,14 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { SupersededError } from '../engine/client';
-import type { EdgeTable } from '../engine/types';
 import { getEngine } from './engine';
 import { useApp } from './store';
 
 /**
  * Latest-wins live preview.
  *
- * - The first effect after an import is suppressed: the base mesh stays visible
- *   until the user changes a parameter or refines the selection.
- * - Every later selection/parameter change schedules one job; the client
- *   coalesces bursts and drops superseded requests.
+ * - An import previews its auto-selected edges right away, like any later
+ *   selection or parameter change. Each change schedules one job after a
+ *   short debounce; the client coalesces bursts and drops superseded requests.
  * - Kernel or worker failures surface in the store instead of being swallowed.
  */
 export function useLivePreview(): void {
@@ -18,21 +16,10 @@ export function useLivePreview(): void {
   const selected = useApp((state) => state.selected);
   const params = useApp((state) => state.params);
 
-  const lastEdges = useRef<EdgeTable | null>(null);
-  const suppress = useRef(true);
-
   useEffect(() => {
-    if (edges !== lastEdges.current) {
-      lastEdges.current = edges;
-      suppress.current = true;
-    }
     if (!edges || !selected) return;
 
     const state = useApp.getState();
-    if (suppress.current) {
-      suppress.current = false;
-      return;
-    }
 
     const ids: number[] = [];
     for (let i = 0; i < selected.length; i++) if (selected[i]) ids.push(i);

@@ -49,7 +49,9 @@ describe('hook-base.stl', () => {
     expect(result.edges.count).toBe(189);
 
     expect(countFlags(result.edges.flags, EDGE_CONVEX)).toBe(79);
-    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(13);
+    // R8 flips the 1 µm cap step at the wall junction: its fake concave edge
+    // across the flat top is gone (13 → 12).
+    expect(countFlags(result.edges.flags, EDGE_CONCAVE)).toBe(12);
     expect(countFlags(result.edges.flags, EDGE_CANDIDATE)).toBe(68);
 
     expect(Math.abs(result.meta.volume - 12871.36)).toBeLessThanOrEqual(0.05);
@@ -65,7 +67,7 @@ describe('hook-base.stl', () => {
     expect(result.meta.degenerateTriangles).toBe(0);
     expect(result.meta.flippedTriangles).toBe(0);
     expect(result.repairs.map((record) => record.code)).toEqual(['sliver']);
-    expect(result.repairs[0].count).toBe(14);
+    expect(result.repairs[0].count).toBe(15);
     expect(result.warnings).toEqual([]);
   });
 

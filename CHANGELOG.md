@@ -6,7 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- New bevel kernel (plan → sweeps and blends → boolean). Widths are limited by
+  real geometry (wall thickness, gaps between walls) measured with BVH ray
+  casts instead of by triangle shapes; a 0.1 mm sliver triangle no longer
+  limits a 45 mm edge to 0.05 mm.
+- Chains of beveled edges are built as one seamless sweep with mitred joints,
+  and sweep trims only act near their own end, so a long curved chain is
+  never cut by the plane at its other end.
+- A selected edge that ends at a corner runs at full width into the end faces
+  (the CAD result) instead of fading out; only a run that stops in the middle
+  of a crease fades.
+- Selection is a brush: a ring follows the cursor, hovered edges are
+  highlighted in the colour of the action, `[` / `]` resize it, and it picks
+  outside and/or inside feature edges only, with a BVH occlusion test.
+
 ### Added
+
+- Rolling-ball vertex blends at any fully beveled corner, for any number of
+  faces and for inside corners, including irregular corners with an extra
+  near-flat crease.
+- Inside fillets between two beveled rims make the rim wrap around the fillet
+  instead of leaving a sharp post.
+- Irregularities shorter than the irregularity scale are bridged: the bevel
+  runs across them.
+- Repair step R8 flips away cap sliver triangles (a vertex lying on the
+  opposite edge, such as a 1 µm step between two caps).
+- A result with crossing triangles is retried once with a 1e-4 mm arc inset.
+- Inspector: brush filter (all / outside / inside), brush size, select all
+  outside or inside edges, clear.
 
 - Bevel-band tint: triangles created by the cut solids are shaded light purple,
   so the fillet is distinguishable from the untouched surface.
@@ -16,6 +45,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The outer rim of the reference hook is beveled continuously through the
+  plate corner, and the three-way corner is round instead of thinning to a
+  point.
+- Inside (concave) bevels keep their full width.
+- Two beveled rims meeting at an inside corner are mitred cleanly; they used
+  to be cut flat at each other's wall, leaving a notch and a spike.
+- An imported model shows its beveled preview right away instead of waiting
+  for the first parameter or selection change.
 - Selected edge chains are beveled continuously: short segments are no longer
   dropped, and joints keep their full radius instead of tapering into gaps.
 - Sweeps at a chain joint are extended by the miter length, so two 90° bevels
